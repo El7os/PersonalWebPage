@@ -594,22 +594,8 @@ the uniform buffer and sending the new buffer to the GPU. <CodeInline>RequirestU
 genereted by the proxy as dirty so that the engine updates or recreates it as soon as possisble. On the other hand <CodeInline>RequestGPUSceneUpdate</CodeInline>
 tells the engine to resend the uniform buffer generated for the proxy to the GPU.
 
-With those functionality being implemented it is time to change the followings :
-* FPrimitiveUniformShaderParameters has no idea about the newly craeted per-object clip plane parameters. It is required to extend the parameter structure
-to contain per-object clip plane parameters.
-* Buffer creation code should be updated so that the engine writes the necessary parameters to the buffer.
-
-<Notification emoji="U+26A0" title="Warning">
-  Clip plane parameters must be updated on the render thread to avoid race conditions.
-</Notification>
-
-<Notification emoji="U+1F4A1" title="Tip">
-  Rebuild shaders after changing the uniform buffer layout.
-</Notification>
-
-<Notification emoji="\u{1F6A8}">
-  You can also pass standard JS Unicode escapes in attribute strings.
-</Notification>
+With those functionality being implemented it is time to change the way of the engine's buffer creation so that the bufffers includes the 
+properties defined by this implementation.
 
 <br></br>
 <br></br>
