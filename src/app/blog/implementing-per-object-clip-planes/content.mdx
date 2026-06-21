@@ -50,7 +50,7 @@ the distance sign is negative and if not then otherwise.
 <MathBlock
   latex="Clip Distance = SignedDistanceToPlane(Q)"
   caption="Setting the clip distnace to the distance of point Q to a plane"
-  size="xlarge"
+  size="large"
 />
 Since it is an often practised implementation to use planes to derive those clip distances, these kind of implementations are often referred as "clip planes".
 
@@ -78,7 +78,7 @@ Mathematically, an infinite plane is defined as the following
 <MathBlock
   latex="\vec{N} \cdot (\vec{P} - \vec{P}_0) = 0"
   caption="Plane Equation"
-  size="xlarge"
+  size="large"
 />
 
 Where $\vec{N}$ is the normal vector of the plane and $\vec{P}_0$ is an arbitrary point lying on the plane.
@@ -98,7 +98,7 @@ the arbitrary point $\vec{P}_0$ is selected as the following :
 <MathBlock
   latex="\vec{P}_0 = D_p * \vec{N}"
   caption=""
-  size="xlarge"
+  size="large"
 />
 
 Geometrically, it means to select the arbitarary point $\vec{P}_0$ as the point where the normal vector $\vec{N}$ intersects with the plane itself.
@@ -144,7 +144,7 @@ Therefore :
 <MathBlock
   latex="D_Q = \vec{Q} \cdot \vec{N} - D_P"
   caption=""
-  size="xlarge"
+  size="large"
 />
 
 By arranging the equation a little bit something magneficent can reveal
@@ -156,7 +156,7 @@ By arranging the equation a little bit something magneficent can reveal
          D_Q &= <N_X, N_Y, N_Z, -D_P> \cdot <Q_X, Q_Y, Q_Z, 1> 
          \end{align*}"
   caption=""
-  size="xlarge"
+  size="large"
 />
 
 Computing the distance of the point $\vec{Q}$ from the plane becomes as trivial as evaluating the dot product of two vectors.
@@ -180,16 +180,20 @@ thread and eventually to the GPU.
 
 <br></br>
 
-### From The Start 
+### From The Start : Defining The Variables
 
-Primitive component is the base class of any componet that has an existing volume on the game world. 
-Adding the required information here for per object clip plane here allows the clipping feature to work accross all the
-meshes and other primitives that inherits from primitive component.
+Primitive component is the base class of any componet that has a volume in the game world. Inserting the information
+required for the per-object clip plane implementation here allows the feature to work with all types of meshes and other primitives
+that inherits from primitive component.
 
 <br></br>
 
-Only two information is required to be added here. First a flag indicating that whether the component has a per-object clip plane and the
-second one is the plane itself. Since this part of the implementation is going to be exposed to general users it's worth making it simple
+Only three informations are:
+* A boolean flag indicating that whether the component has a per-object clip plane
+* A <CodeInline>FVector</CodeInline> representing the normal vector of the clip plane in world space 
+* A <CodeInline>FVector</CodeInline> representing the distance of the clip plane from the world center in world space
+
+Since this part of the implementation is going to be exposed to general users it's worth making it simple
 and explanatory.    
 
 <CodeBlock
@@ -224,7 +228,11 @@ class UPrimitiveComponent : public USceneComponent ....
   filename="PrimitiveComponent.h"
 />
 
-The next thing to to implement is going to be the functions that allows the users to change them at runtime.
+There properties are going to change both at editor time and runtime. To allow runtime modifcation
+by the users we need to add functions that will allow them to change the values. These functions are going to be
+exposed to the blueprint system so that users can use them in their blueprint scripts.
+
+<br></br>
 
 <CodeBlock
   code={`
@@ -288,17 +296,21 @@ void UPrimitiveComponent::SetPerObjectClipPlane(const FVector& PlaneNormal, floa
 />
 
 If you are after this kind of implementation it is a high probability that you already know what are scene proxies and where they
-are located in the scene hierarch of the unreal but it is worth explaing them shortly anyways. SceneProxies are the render thread representations of 
+are located in the scene hierarch of the unreal but it is worth explaing them shortly anyways. Scene proxies are the render thread representations of 
 scene components. Render thread comminucates with the game world through them and visa versa. Even though the functions called inside of the setter functions do not exists 
 at this time (they are going to defined shortly after) the main intention is updating the scene representation of our primitive about the
 changes made on the owner component. Thus we make both aligned to each other. 
 
 <br></br>
 
-Additionally, it is required to listen the changes made in the details panel while in editor mode and reflect those changes to the scene proxies as well.
+Even though this solves the runtime modification of the clip plane parameters the same is not true for the editor mode.
+It is required to listen the changes made in the details panel while in editor mode and reflect those changes to the scene proxies as well.
+
+<Notification emoji="U+1F4A1"> 
 In fact this pattern is going to repeat itself along the implementation. It is required to extend the engine to support both the changes made at run time and editor mode.
 Even though most of the code path does not diverge from one another there are some places where each cases requires different implementations in
 different stages. Both are going to be mentioned here.
+</Notification>
 
 <br></br>
 The main nuance while notifying the proxy from the changes is that if one changes a property(rendering releated) of a primitive component at runtime the engine basically updates the already created scene proxy 
@@ -597,3 +609,15 @@ properties defined by this implementation.
 <br></br>
 <br></br>
 <br></br>
+
+<Notification emoji="U+1F4A1">
+  This is a tip. You can use **markdown** inside.
+</Notification>
+
+<Notification emoji="U+26A0">
+  Warning: something important here.
+</Notification>
+
+<Notification emoji="⚠️">
+  You can also pass the emoji character directly.
+</Notification>
