@@ -6,6 +6,7 @@ import CodeBlock from './components/CodeBlock'
 import CodeInline from './components/CodeInline'
 import MathBlock from './components/MathBlock'
 import MathInline from './components/MathInline'
+import Notification from './components/Notification'
 
 export function useMDXComponents(components: MDXComponents): MDXComponents {
     return {
@@ -17,5 +18,6 @@ export function useMDXComponents(components: MDXComponents): MDXComponents {
         CodeInline,
         MathBlock,
         MathInline,
+        Notification,
     }
 }
