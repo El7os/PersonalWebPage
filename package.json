@@ -3,10 +3,11 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "dev": "next dev",
+    "dev": "next dev --webpack",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "kill": "cmd /c \"FOR /F 'tokens=5' %a IN ('netstat -aon ^| findstr :3000') DO taskkill /F /PID %a\""
   },
   "dependencies": {
     "@mdx-js/loader": "^3.1.1",
