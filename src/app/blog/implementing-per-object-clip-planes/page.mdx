@@ -1,0 +1,603 @@
+export const metadata = {
+  title: 'Implementing Per-Object Clip Planes in Unreal Engine 5'
+}
+
+# Implementing Per-Object Clip Planes in Unreal Engine 5
+
+In modern real-time rendering, specialized visual effects, gameplay mechanics, and visualization tools often require geometry to be dynamically clipped.
+While Unreal Engine 5 provides robust support for global clip planes—typically utilized for planar water reflections—it lacks out-of-the-box support 
+for isolating this behavior on a per-object basis.
+
+<br></br>
+
+Implementing per-object clip planes allows developers to slice, hollow out, or selectively cull geometry on specific primitives without affecting adjacent elements in the scene.
+This capability is crucial for applications ranging from architectural visualizations and medical imaging to sci-fi cross-section shaders.
+
+<br></br>
+Multiple clip planes can be supported at the same time, and this implementation uses one of them just like Unreal Engine's natively supported
+global clip planes. When global clip planes are enabled unreal uses a one of many clip planes to clip vertices out of the screen and the 
+position as well as the direction of the plane is defined per camera bases. This implementation makes the same but uses the another
+clip plane (in order to coexist with global clip plane) and the properties of the clip plane changes per object basis hence allows the user to
+set custom clip planes by object.
+
+<br></br>
+
+Before diving into how to implement the clip plane it is required to understand how clip planes work.
+
+<br></br>
+
+<BeforeAfter 
+  imageBefore='/blog/implementing-per-object-clip-planes/Image_Box_NotClipped.jpg' 
+  imageAfter='/blog/implementing-per-object-clip-planes/Image_Box_Clipped.jpg'
+/>
+
+<br></br>
+
+## What Are Clip Planes And Where to Find Them
+
+In computer graphics, the hardware uses some additional set of distances determine wheter a vertex should be clipped out.
+Rather than relying solely on software-side algorithms, modern graphics APIs (such as DirectX, Vulkan, and OpenGL) natively reserve
+specialized hardware registers for these clip distances—typically supporting a minimum of 6 to 8 at the same time.
+
+<br></br>
+
+During the vertex processing stage of the rendering pipeline, the hardware evaluates the calculated distance value and checks if  
+a vertex yields a negative result. If it does then the hardware rasterizer clips the primitive along this boundary, cleanly discarding the non-visible fragments before they ever reach the pixel shader.
+Basically all it does is checking the values of each supported clip distances and clipping the vertex if at least one of the distance values is below zero.
+
+<br></br>
+
+Generally, developers uses plane to derive that clip distance value. An arbitrary plane gets selected and distance value is set to the 
+distance of the queryied vertex from that plane. If the point is lying on the sane side of the plane with the plane normal
+the distance sign is negative and if not then otherwise.
+
+<MathBlock
+  latex="Clip Distance = SignedDistanceToPlane(Q)"
+  caption="Setting the clip distnace to the distance of point Q to a plane"
+  size="xlarge"
+/>
+Since it is an often practised implementation to use planes to derive those clip distances, these kind of implementations are often referred as "clip planes".
+
+<br></br>
+
+Nativally Unreal Engine supports global clip plane feature and when this feature is defined the engine checks each vertex against a plane
+defined per-camera basis to derive clip distance values. The name "global" is referring to its being global for each object displayed by 
+the same camera. Notice, different cameras can have different global clip planes. 
+
+<br></br>
+
+The aim of this implementation is to extend the global clip plane support to per object clip plane, by basically doing the same 
+but definin the clip plane used to derive clip distances per object basis so that each object can have a different clip plane.
+Since there graphics api's supports multiple clip distances to be used at the same time we are going to use a different clip distnace
+rather then the global clip plane so that it can be used with the global clip plane as well.
+
+<br></br>
+
+### Plane Representation
+
+<br></br>
+
+Mathematically, an infinite plane is defined as the following
+
+<MathBlock
+  latex="\vec{N} \cdot (\vec{P} - \vec{P}_0) = 0"
+  caption="Plane Equation"
+  size="xlarge"
+/>
+
+Where $\vec{N}$ is the normal vector of the plane and $\vec{P}_0$ is an arbitrary point lying on the plane.
+
+<br></br>
+
+<p align="center">
+  <img src="/blog/implementing-per-object-clip-planes/Image_Plane.svg" alt="Plane"></img>
+</p>
+
+<br></br>
+
+From that equation it can be deducet that two <CodeInline>FVector3f</CodeInline>s are required to represent a 3D plane in world space. 
+But it is possible to represent a 3D plane in more compact form. A plane can be represented by one <CodeInline>FVector4f</CodeInline> if 
+the arbitrary point $\vec{P}_0$ is selected as the following :
+
+<MathBlock
+  latex="\vec{P}_0 = D_p * \vec{N}"
+  caption=""
+  size="xlarge"
+/>
+
+Geometrically, it means to select the arbitarary point $\vec{P}_0$ as the point where the normal vector $\vec{N}$ intersects with the plane itself.
+
+<p align="center">
+  <img src="/blog/implementing-per-object-clip-planes/Image_Plane_WithWorldOrigin.svg" alt="PlaneWithWorldOrigin"></img>
+</p>
+
+Under this condition a plane can be represented by storing the normal vector $\vec{N}$ as the first three elements of the <CodeInline>FVector4f</CodeInline>
+and the distance $D_p$ as the last element.
+This compact representation reduces the memory footprint of the plane by two floating points. Additionally, representing a plane in this
+form creates some unique and effective ways to make plane-point test.
+
+
+<br></br>
+### Evaluating Point-Plane Distance
+<br></br>
+
+When it comes to clipping vertices along some plane, it is unavoidable to perform the plane-line distance calculation.
+There are multiple ways and interpretations to it but one spesific interpretation becomes handy in this type of implementation.
+
+It is a good practice to start a mathmatical problem by defining clear variable and goal definitions. 
+* $\vec{Q}$ is the point of interest, the location of the vertex.
+* $D_Q$ is the signed distance of the query point $\vec{Q}$ from the clipping plane and it is going to be refered as clip distance from now on. The main goal is to find this value.
+* $D_P$ is the distance value satisfying the equation $\vec{P}_0 = D_P * \vec{N}$. In other words, the distance of the plane along the normal vector of the plane in world space.
+
+<br></br>
+
+Note that the shortest distance from a point to a plane is measured along the direction perpendicular to
+the plane.
+Because the plane normal is perpendicular to the plane, $D_Q​$ can be computed by projecting the query point onto the plane normal. 
+The difference between the projected distance of the query point and the plane's distance from the origin gives the signed distance $D_Q$.
+The geometric interpretation is shown below:
+
+<br></br>
+
+<p align="center">
+  <img src="/blog/implementing-per-object-clip-planes/Image_Plane_Distance.svg" alt="Plane"></img>
+</p>
+
+Therefore :
+
+<MathBlock
+  latex="D_Q = \vec{Q} \cdot \vec{N} - D_P"
+  caption=""
+  size="xlarge"
+/>
+
+By arranging the equation a little bit something magneficent can reveal
+
+<MathBlock
+  latex="\begin{align*}
+         D_Q &= \vec{Q} \cdot \vec{N} - D_P \\
+         D_Q &= Q_X * N_X + Q_Y * N_Y + Q_Z * N_Z - D_P * 1 \\
+         D_Q &= <N_X, N_Y, N_Z, -D_P> \cdot <Q_X, Q_Y, Q_Z, 1> 
+         \end{align*}"
+  caption=""
+  size="xlarge"
+/>
+
+Computing the distance of the point $\vec{Q}$ from the plane becomes as trivial as evaluating the dot product of two vectors.
+Notice that the left-hand operand is almost identical to the 4D vector representation of the plane, except that the distance term is negated.
+The right-hand operand is the query point represented as a homogeneous 4D vector, obtained by appending a 1 as the fourth component.
+The dot product of these two vectors directly yields the signed distance of $\vec{Q}$ from the plane.
+
+<br></br>
+## Implementing Per-Object Clip Plane
+<br></br>
+
+Per object clip plane implementation requires to modify the engine source code to allow information flow all the way from
+a simple UPrimitiveComponent to necessary shaders. Along this way the information is required to be carried over from the game thread to the render
+thread and eventually to the GPU.
+
+<br></br>
+
+<p align="center">
+  <img src="/blog/implementing-per-object-clip-planes/Image_ToDo.svg" alt="Plane"></img>
+</p>
+
+<br></br>
+
+### From The Start 
+
+Primitive component is the base class of any componet that has an existing volume on the game world. 
+Adding the required information here for per object clip plane here allows the clipping feature to work accross all the
+meshes and other primitives that inherits from primitive component.
+
+<br></br>
+
+Only two information is required to be added here. First a flag indicating that whether the component has a per-object clip plane and the
+second one is the plane itself. Since this part of the implementation is going to be exposed to general users it's worth making it simple
+and explanatory.    
+
+<CodeBlock
+  code={`
+
+class UPrimitiveComponent : public USceneComponent ....
+{
+    //...
+    /*
+    * Set to true if this primitive has a custom clip plane.
+    * r.Allow.GlobalClipPlane must be true to use this feature
+    */
+    UPROPERTY(EditAnywhere, Category=Rendering)
+    bool bPerObjectClipPlaneEnabled = false;
+
+    /*
+    * Normal (world space) vector of the custom clipping plane of this primitive.
+    * bPerObjectClipPlaneEnabled should be true to edit this value.
+    */
+    UPROPERTY(EditAnywhere, Category=Rendering, meta=(EditCondition="bPerObjectClipPlaneEnabled"))
+    FVector PerObjectClipPlaneNormal = FVector::ZeroVector;
+
+    /*
+    * The offset of the clipping plane from the world center (0, 0, 0)
+    * bPerObjectClipPlaneEnabled should be true to edit this value.
+    */
+    UPROPERTY(EditAnywhere, Category=Rendering, meta=(EditCondition="bPerObjectClipPlaneEnabled"))
+    float PerObjectClipPlaneDistance = 0.0f;
+    //...
+}
+`}
+  filename="PrimitiveComponent.h"
+/>
+
+The next thing to to implement is going to be the functions that allows the users to change them at runtime.
+
+<CodeBlock
+  code={`
+
+//PrimitiveComponent.h
+class UPrimitiveComponent : public USceneComponent ....
+{
+    //...
+    /** Sets bPerObjectClipPlaneEnabled property and marks the render state dirty */
+    UFUNCTION(BlueprintCallable, Category = "Rendering")
+    ENGINE_API void SetPerObjectClipPlaneEnabled(bool bValue);
+
+    /**
+    * Sets PerObjectPlaneNormal and PerObjectPlaneDistance properties and
+    * marks the render state dirty.
+    */
+    UFUNCTION(BlueprintCallable, Category = "Rendering")
+    ENGINE_API void SetPerObjectClipPlane(const FVector& PlaneNormal, float PlaneDistance);
+
+    UFUNCTION(BlueprintCallable, Category = "Rendering")
+    ENGINE_API bool GetPerObjectClipPlaneEnabled() const
+    {
+      return bPerObjectClipPlaneEnabled;
+    }
+    
+    UFUNCTION(BlueprintCallable, Category = "Rendering")
+    ENGINE_API void GetPerObjectClipPlane(FVector& PlaneNormal, float& PlaneDistance) const
+    {
+      PlaneNormal = PerObjectClipPlaneNormal;
+      PlaneDistance = PerObjectClipPlaneDistance;
+    }
+    //...
+}
+
+//PrimitiveComponent.cpp
+void UPrimitiveComponent::SetPerObjectClipPlaneEnabled(bool bValue)
+{
+    if (bPerObjectClipPlaneEnabled != bValue)
+    {
+        bPerObjectClipPlaneEnabled = bValue;
+
+        if (SceneProxy)
+        {
+            SceneProxy->SetPerObjectClipPlaneEnabled_GameThread(bValue);
+        }
+    } 
+}
+
+void UPrimitiveComponent::SetPerObjectClipPlane(const FVector& PlaneNormal, float PlaneDistance)
+{
+    const bool bShouldUpdate = bPerObjectClipPlaneEnabled && ( !PlaneNormal.Equals(PerObjectClipPlaneNormal) || !FMath::IsNearlyEqual(PlaneDistance, PerObjectClipPlaneDistance));
+
+    PerObjectClipPlaneNormal = PlaneNormal;
+    PerObjectClipPlaneDistance = PlaneDistance;
+    
+    if (bShouldUpdate && SceneProxy)
+        SceneProxy->SetPerObjectClipPlane_GameThread(FVector4(PerObjectClipPlaneNormal.GetSafeNormal(), -PerObjectClipPlaneDistance));
+}
+`}
+  filename=""
+/>
+
+If you are after this kind of implementation it is a high probability that you already know what are scene proxies and where they
+are located in the scene hierarch of the unreal but it is worth explaing them shortly anyways. SceneProxies are the render thread representations of 
+scene components. Render thread comminucates with the game world through them and visa versa. Even though the functions called inside of the setter functions do not exists 
+at this time (they are going to defined shortly after) the main intention is updating the scene representation of our primitive about the
+changes made on the owner component. Thus we make both aligned to each other. 
+
+<br></br>
+
+Additionally, it is required to listen the changes made in the details panel while in editor mode and reflect those changes to the scene proxies as well.
+In fact this pattern is going to repeat itself along the implementation. It is required to extend the engine to support both the changes made at run time and editor mode.
+Even though most of the code path does not diverge from one another there are some places where each cases requires different implementations in
+different stages. Both are going to be mentioned here.
+
+<br></br>
+The main nuance while notifying the proxy from the changes is that if one changes a property(rendering releated) of a primitive component at runtime the engine basically updates the already created scene proxy 
+(note that this is not always the case), but when it comes to the changes made in the editor the engine does not bother to update any proxies and rather recreate them.
+Therefore it is required to modify the code so that the engine recreates the scene proxy of the component when a per-object clip plane releated property gets changed in the editor
+and additionally, the newly createad proxy reads from per-object clip plane parameters while being created.
+
+<br></br>
+
+The first part is relativally easy. When a property gets changed in editor mode via details panel the editor calls a function called <CodeInline>UPrimitiveComponent::PostEditChangeProperty</CodeInline>.
+By changing the code in this function it is possible to force the engine to recreate the scene proxy of the component. In fact, the engine engine code does the same thing as a reaction to change in 
+other renedering releated properties already. Inspect the following
+
+<CodeBlock
+  code={`
+#if WITH_EDITOR // Editor only functionality
+void UPrimitiveComponent::PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent)
+{
+    //...
+    // we need to reregister the primitive if the min draw distance changed to propagate the change to the rendering thread
+    if (PropertyName == GET_MEMBER_NAME_CHECKED(UPrimitiveComponent, MinDrawDistance))
+    {
+        MarkRenderStateDirty(); // This is how the source code does already.
+    }
+    //...
+}
+#endif
+`}
+  filename="PrimitiveComponent.cpp"
+/>
+
+All to do is adding an additional if statement checking whether any of per-object clip plane related properties are changed, before invalidating the current render state hence forcing
+the engine to recreate the scene proxy.
+
+<CodeBlock
+  code={`
+
+void UPrimitiveComponent::PostEditChangeProperty(...)
+{
+    //...
+    // Primitive uniform buffer should be updated, therefore mark the render state as dirty once any of the
+	  // properties related to per object clip plane get changed.
+	  if (PropertyName == GET_MEMBER_NAME_CHECKED(UPrimitiveComponent, bPerObjectClipPlaneEnabled) ||
+	      PropertyName == GET_MEMBER_NAME_CHECKED(UPrimitiveComponent, PerObjectClipPlaneNormal) ||
+        PropertyName == GET_MEMBER_NAME_CHECKED(UPrimitiveComponent, PerObjectClipPlaneDistance))
+    {
+        MarkRenderStateDirty();
+    }
+    //...
+}
+`}
+  filename="PrimitiveComponent.cpp"
+/>
+
+With the first step being done all it is require to change the scene proxy creation path so that is reads the information that is defined in the component
+and writes in itself as being created.
+
+<p align="center">
+  <img src="/blog/implementing-per-object-clip-planes/Image_ProxyCreation.svg" alt="Plane"></img>
+</p>
+
+To learn more see _How Small Open Doors Can Lead to Better CPU Utilization and Bigger Games | Unreal Fest 2024_ (https://www.youtube.com/watch?v=JaCf2Qmvy18)
+
+Even though the main goal is to carry the information to the proxy while the proxy is being created it is obvious that the information should be carried from the component to the description,
+and then to the proxy from that description. 
+Happy news is that the process is basic, new variables are going to be created in the description and then the information is going to be stored in those variables, hence carrying the information to the 
+description is going to be done. Then the same is going to be done to carry the information to the proxies.
+
+<CodeBlock
+  code={`
+
+//Header file
+struct FPrimitiveSceneProxyDesc
+{
+    FPrimitiveSceneProxyDesc()
+    {
+      //...
+      bPerObjectClipPlaneEnabled = false;
+      PerObjectClipPlane = FVector4(0.0f, 0.0f, 0.0f, 0.0f);
+      //...
+    }
+
+    //...
+    uint32 bPerObjectClipPlaneEnabled : 1;
+    FVector4 PerObjectClipPlane;
+    //...
+
+}
+//CPP file
+void FPrimitiveSceneProxyDesc::InitializeFromPrimitiveComponent(const UPrimitiveComponent* InComponent)
+{
+    //...
+    bPerObjectClipPlaneEnabled = InComponent->GetPerObjectClipPlaneEnabled();
+
+    FVector InPerObjectClipPlane;
+    float InPerObjectClipPlaneDistance;
+
+    InComponent->GetPerObjectClipPlane(InPerObjectClipPlane, InPerObjectClipPlaneDistance);
+
+    PerObjectClipPlane = FVector4(InPerObjectClipPlane, InPerObjectClipPlaneDistance);
+}
+
+`}
+  filename=""
+/>
+
+Then the same for the proxies.
+
+<CodeBlock
+  code={`
+
+//Header file
+struct FPrimitiveSceneProxy
+{
+    //...
+    /** Enable per object clip plane on this object, it is not used if r.Allow.GlobalClipPlane is not enabled.*/
+    uint8 bPerObjectClipPlaneEnabled : 1;
+
+        	
+    /**
+    * Per object clip plane defined in global space
+    * (x,y,z) represents the plane normal in world space (normalized)
+    * w represents the distance of the plane from the world origin. It's negated.
+    */
+    FVector4 PerObjectClipPlane;
+
+}
+//CPP file
+FPrimitiveSceneProxy::FPrimitiveSceneProxy(const FPrimitiveSceneProxyDesc& InProxyDesc)
+{
+    //...
+    bPerObjectClipPlaneEnabled = InProxyDesc.bPerObjectClipPlaneEnabled;
+	  PerObjectClipPlane = InProxyDesc.PerObjectClipPlane;
+}
+
+`}
+  filename=""
+/>
+
+With that being the all the implementation required to carry the information from the game thread to the proxies at the render thread is done.
+
+The next step is to carry the information to the GPU before using those values in shaders to cull actual vertices.
+
+But, to accomplish this stage a meta undestanding of unreal's buffer information pipeline should be undestood.
+Even though proxies are the shadows of the game objects on the render thread they are still reside in the CPU. GPU has no idea about those 
+objects. Unreal solves this issue by generating something called primitive uniform shader parameter. Unreal employs a collection of shader 
+parameters and call them <CodeInline>FPrimitiveUniformShaderParameters</CodeInline>. The parameter collection is basically a sequence of 
+float4 data which are treated as raw memory units. The information about the primitive is serialized into those parameters and send to the GPU based on
+an agreed packing configuration, such as 34th Fvector4f  represents the object location in camera space etc.
+
+<br></br>
+
+The general pipeline is very similar with the previous one. Inspect the following diagram.
+
+<p align="center">
+  <img src="/blog/implementing-per-object-clip-planes/Image_BuilderInformationFlow.svg" alt="Plane"></img>
+</p>
+
+### Inducing the builder
+
+Since creating a FPrimitiveUniformBufferParameters of an object, which is going to be referred as uniform buffer of an object, is not a efficent
+thing to do every frame the engine follows an event based system. It creates the uniform buffer when a primitive proxy is craeted or when the uniform buffer
+is marked as dirty , indicating a recent change in the proxy's state which concerns the GPU as well. 
+
+<br></br>
+
+The first one is handled by the engine but the second one is not. Since per object clip plane parameters are newly introduces the engine
+does not know that it should generate the uniform buffers for the object when those variables gets changed. 
+
+Luckly we are halfway there. Do you remember the functions that we call to notify the scene proxy about the changes made in the component,
+well it is time to revisit and define them.
+
+<br></br>
+
+Those functions were <CodeInline>SetPerObjectClipPlaneEnabled_GameThread(bool)</CodeInline> and <CodeInline>SetPerObjectClipPlane_GameThread(FVector4)</CodeInline>
+
+Notice, functions has _GameThread_ suffix. This is because these functions are designed to be called only in game thread. Their definitions
+are going to call their _RenderThread_ versions and then those functions are going to mutate the variables of the proxy. But additionally since 
+per-object clip plane releated  variables are also changed with that call it is a good place to let the engine know that it should update the
+uniform buffers. 
+
+<CodeBlock
+  code={`
+
+//Header file
+struct FPrimitiveSceneProxy
+{
+    //...
+    /*
+    * Set per object clip plane enabled flag
+    *
+    * @param the new value
+    */
+    void SetPerObjectClipPlaneEnabled_GameThread(bool bEnabled);
+
+    /**
+    * Set per object clip plane
+    * x,y, and z is used to define the normal vector of the plane
+    * in world space where the last value w is used to define the distance
+    * of the plane from the world origin (0, 0, 0)
+    * 
+    * @param ClipPlane 
+    */
+    void SetPerObjectClipPlane_GameThread(const FVector4& ClipPlane);
+
+    /*
+    * Set per object clip plane enabled flag (RENDER THREAD)
+    *
+    * @param the new value
+    */
+    void SetPerObjectClipPlaneEnabled_RenderThread(bool bEnabled);
+
+    /**
+    * Set per object clip plane
+    * x,y, and z is used to define the normal vector of the plane
+    * in world space where the last value w is used to define the distance
+    * of the plane from the world origin (0, 0, 0)
+    *
+    * (RENDER THREAD)
+    * 
+    * @param ClipPlane 
+    */
+    void SetPerObjectClipPlane_RenderThread(const FVector4& ClipPlane);
+}
+
+//CPP file
+void FPrimitiveSceneProxy::SetPerObjectClipPlaneEnabled_GameThread(bool bEnabled)
+{
+    check(IsInGameThread())
+
+    ENQUEUE_RENDER_COMMAND(FSetPerObjectClipPlaneEnabled)(
+    [this, bEnabled](FRHICommandList& RHICmdList)
+    {
+      this->SetPerObjectClipPlaneEnabled_RenderThread(bEnabled);	
+    });
+}
+
+void FPrimitiveSceneProxy::SetPerObjectClipPlane_GameThread(const FVector4& ClipPlane)
+{
+    check(IsInGameThread())
+
+    ENQUEUE_RENDER_COMMAND(FSetPerObjectClipPlane)(
+    [this, ClipPlane](FRHICommandList& RHICmdList)
+    {
+      this->SetPerObjectClipPlane_RenderThread(ClipPlane);
+    });
+}
+
+void FPrimitiveSceneProxy::SetPerObjectClipPlaneEnabled_RenderThread(bool bEnabled)
+{
+    check(IsInRenderingThread())
+
+    if (bPerObjectClipPlaneEnabled != bEnabled)
+    {
+        bPerObjectClipPlaneEnabled = bEnabled;
+
+        if (PrimitiveSceneInfo)
+        {
+            Scene->RequestUniformBufferUpdate(*PrimitiveSceneInfo);
+            Scene->RequestGPUSceneUpdate(*PrimitiveSceneInfo, EPrimitiveDirtyState::ChangedOther);
+        }
+    }
+}
+
+void FPrimitiveSceneProxy::SetPerObjectClipPlane_RenderThread(const FVector4& ClipPlane)
+{
+    check(IsInRenderingThread())
+
+    const bool bShouldUpdate = bPerObjectClipPlaneEnabled && !ClipPlane.Equals(PerObjectClipPlane);
+    
+    PerObjectClipPlane = ClipPlane;
+
+    if (bShouldUpdate && PrimitiveSceneInfo)
+    {
+        Scene->RequestUniformBufferUpdate(*PrimitiveSceneInfo);
+        Scene->RequestGPUSceneUpdate(*PrimitiveSceneInfo, EPrimitiveDirtyState::ChangedOther);
+    }
+}
+`}
+  filename=""
+/>
+
+<CodeInline>ENQUEUE_RENDER_COMMAND</CodeInline> macro basically queues a lambda function to be called by the render thread. 
+It is one of the main comminication ways with the render thread. With that being used the new values of the properties can be copied into lambda
+and then get written to the actual variables in render thread, hence avoiding race conditions.
+
+Notice the additioanl function calls made by the render thread versions of the the mutator functions. These two functions are responsible for updateding
+the uniform buffer and sending the new buffer to the GPU. <CodeInline>RequirestUniformBufferUpdate</CodeInline> basically marks the uniform buffer
+genereted by the proxy as dirty so that the engine updates or recreates it as soon as possisble. On the other hand <CodeInline>RequestGPUSceneUpdate</CodeInline>
+tells the engine to resend the uniform buffer generated for the proxy to the GPU.
+
+With those functionality being implemented it is time to change the way of the engine's buffer creation so that the bufffers includes the 
+properties defined by this implementation.
+
+<br></br>
+<br></br>
+<br></br>
+<br></br>

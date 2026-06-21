@@ -1,0 +1,52 @@
+export const metadata = {
+  title: 'Optimizing Draw Calls in Unreal Engine 5'
+}
+
+# Optimizing Draw Calls in Unreal Engine 5
+
+As game environments become larger and more complex, draw call count remains one of the most critical aspects of rendering performance. Every time the CPU submits a draw call to the GPU, there is overhead. In Unreal Engine 5, Nanite alleviates a lot of this, but understanding how to manually batch calls remains an essential skill for a C++ engine programmer.
+
+<GameGif src="https://via.placeholder.com/600x300/1a1a1a/00ffcc?text=Animated+Optimized+Draw+Calls" alt="Visualizing draw calls in the editor" />
+
+### The Problem
+
+In a typical scene, every unique material and mesh combination results in a new draw call. If you have 10,000 distinct objects scattered across a terrain, you can quickly hit API limits. Let's look at the difference rendering a scene with standard static mesh actors versus using Hierarchical Instanced Static Meshes (HISM).
+
+<BeforeAfter 
+  imageBefore="https://via.placeholder.com/800x400/1a1a1a/ff0000?text=Unoptimized+(10,000+Draw+Calls)" 
+  imageAfter="https://via.placeholder.com/800x400/1a1a1a/00ffcc?text=Optimized+(HISM+-+100+Draw+Calls)" 
+/>
+
+### C++ Implementation
+
+By leveraging `UInstancedStaticMeshComponent`, we can batch thousands of identical meshes using the same material into a single draw call.
+
+```cpp
+// Example C++ snippet showing instance addition
+void AMyGameEnvironment::SpawnTrees()
+{
+    // Initialize our Instanced Static Mesh Component
+    TreeInstancedMeshComponent = CreateDefaultSubobject<UInstancedStaticMeshComponent>(TEXT("TreeISMC"));
+    TreeInstancedMeshComponent->SetStaticMesh(TreeMesh);
+    
+    // Add 10,000 instances
+    for (int32 i = 0; i < 10000; i++)
+    {
+        FTransform InstanceTransform;
+        InstanceTransform.SetLocation(FVector(FMath::RandRange(-5000.f, 5000.f), FMath::RandRange(-5000.f, 5000.f), 0.f));
+        InstanceTransform.SetRotation(FQuat::MakeFromEuler(FVector(0.f, 0.f, FMath::RandRange(0.f, 360.f))));
+        
+        TreeInstancedMeshComponent->AddInstance(InstanceTransform);
+    }
+}
+```
+
+This simple technique is foundational. Below, you can see the results of our custom rendering pipeline stress-testing dynamic lighting with instanced meshes.
+
+<GameVideo src="https://www.w3schools.com/html/mov_bbb.mp4" autoPlay={true} loop={true} muted={true} />
+
+*Note: Video placeholder demonstrating rendering stress test.*
+
+### Conclusion
+
+Always look for opportunities to instance. Whether you're working with Unreal's built-in systems or writing raw Vulkan/DirectX code, reducing CPU-GPU communication is the key to maintaining a high framerate.
