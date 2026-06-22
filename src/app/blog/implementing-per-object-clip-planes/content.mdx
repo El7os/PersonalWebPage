@@ -56,14 +56,14 @@ Since it is an often practised implementation to use planes to derive those clip
 
 <br></br>
 
-Nativally Unreal Engine supports global clip plane feature and when this feature is defined the engine checks each vertex against a plane
+Nativally Unreal Engine supports global clip plane feature and when this feature is enabled the engine checks each vertex against a plane
 defined per-camera basis to derive clip distance values. The name "global" is referring to its being global for each object displayed by 
 the same camera. Notice, different cameras can have different global clip planes. 
 
 <br></br>
 
 The aim of this implementation is to extend the global clip plane support to per object clip plane, by basically doing the same 
-but definin the clip plane used to derive clip distances per object basis so that each object can have a different clip plane.
+but defining the clip plane used to derive clip distances per object basis so that each object can have a different clip plane.
 Since there graphics api's supports multiple clip distances to be used at the same time we are going to use a different clip distnace
 rather then the global clip plane so that it can be used with the global clip plane as well.
 
@@ -91,7 +91,7 @@ Where $\vec{N}$ is the normal vector of the plane and $\vec{P}_0$ is an arbitrar
 
 <br></br>
 
-From that equation it can be deducet that two <CodeInline>FVector3f</CodeInline>s are required to represent a 3D plane in world space. 
+From that equation it can be deduced that two <CodeInline>FVector3f</CodeInline>s are required to represent a 3D plane in world space. 
 But it is possible to represent a 3D plane in more compact form. A plane can be represented by one <CodeInline>FVector4f</CodeInline> if 
 the arbitrary point $\vec{P}_0$ is selected as the following :
 
@@ -110,7 +110,7 @@ Geometrically, it means to select the arbitarary point $\vec{P}_0$ as the point 
 Under this condition a plane can be represented by storing the normal vector $\vec{N}$ as the first three elements of the <CodeInline>FVector4f</CodeInline>
 and the distance $D_p$ as the last element.
 This compact representation reduces the memory footprint of the plane by two floating points. Additionally, representing a plane in this
-form creates some unique and effective ways to make plane-point test.
+form creates some unique and effective ways to make plane-point test. We will get to that in a moment.
 
 
 <br></br>
@@ -119,7 +119,7 @@ form creates some unique and effective ways to make plane-point test.
 
 When it comes to clipping vertices along some plane, it is unavoidable to perform the plane-line distance calculation.
 There are multiple ways and interpretations to it but one spesific interpretation becomes handy in this type of implementation.
-
+<br></br>
 It is a good practice to start a mathmatical problem by defining clear variable and goal definitions. 
 * $\vec{Q}$ is the point of interest, the location of the vertex.
 * $D_Q$ is the signed distance of the query point $\vec{Q}$ from the clipping plane and it is going to be refered as clip distance from now on. The main goal is to find this value.
@@ -162,7 +162,7 @@ By arranging the equation a little bit something magneficent can reveal
 Computing the distance of the point $\vec{Q}$ from the plane becomes as trivial as evaluating the dot product of two vectors.
 Notice that the left-hand operand is almost identical to the 4D vector representation of the plane, except that the distance term is negated.
 The right-hand operand is the query point represented as a homogeneous 4D vector, obtained by appending a 1 as the fourth component.
-The dot product of these two vectors directly yields the signed distance of $\vec{Q}$ from the plane.
+The dot product of these two vectors directly yields the signed distance of $\vec{Q}$ from the plane. 
 
 <br></br>
 ## Implementing Per-Object Clip Plane
@@ -188,10 +188,10 @@ that inherits from primitive component.
 
 <br></br>
 
-Only three informations are:
+Only three informations are requred:
 * A boolean flag indicating that whether the component has a per-object clip plane
 * A <CodeInline>FVector</CodeInline> representing the normal vector of the clip plane in world space 
-* A <CodeInline>FVector</CodeInline> representing the distance of the clip plane from the world center in world space
+* A floating point representing the distance of the clip plane from the world center in world space
 
 Since this part of the implementation is going to be exposed to general users it's worth making it simple
 and explanatory.    
@@ -228,9 +228,12 @@ class UPrimitiveComponent : public USceneComponent ....
   filename="PrimitiveComponent.h"
 />
 
-There properties are going to change both at editor time and runtime. To allow runtime modifcation
+These properties are going to be changed both at editor time and runtime. To allow runtime modifcation
 by the users we need to add functions that will allow them to change the values. These functions are going to be
-exposed to the blueprint system so that users can use them in their blueprint scripts.
+exposed to the blueprint system so that users can use them in their blueprint scripts as well.
+<Notification>
+Yes I wrote this system before Unreal Engine 6.
+</Notification>
 
 <br></br>
 
@@ -298,7 +301,7 @@ void UPrimitiveComponent::SetPerObjectClipPlane(const FVector& PlaneNormal, floa
 If you are after this kind of implementation it is a high probability that you already know what are scene proxies and where they
 are located in the scene hierarch of the unreal but it is worth explaing them shortly anyways. Scene proxies are the render thread representations of 
 scene components. Render thread comminucates with the game world through them and visa versa. Even though the functions called inside of the setter functions do not exists 
-at this time (they are going to defined shortly after) the main intention is updating the scene representation of our primitive about the
+at this time (they are going to defined shortly after) the main intention is updating the scene representation of our primitives about the
 changes made on the owner component. Thus we make both aligned to each other. 
 
 <br></br>
@@ -315,8 +318,12 @@ different stages. Both are going to be mentioned here.
 <br></br>
 The main nuance while notifying the proxy from the changes is that if one changes a property(rendering releated) of a primitive component at runtime the engine basically updates the already created scene proxy 
 (note that this is not always the case), but when it comes to the changes made in the editor the engine does not bother to update any proxies and rather recreate them.
-Therefore it is required to modify the code so that the engine recreates the scene proxy of the component when a per-object clip plane releated property gets changed in the editor
-and additionally, the newly createad proxy reads from per-object clip plane parameters while being created.
+
+<br></br>
+Therefore it is required to modify the engine code to do the followings :
+
+1. Force the engine to recreate the scene proxy of the component when a per-object clip plane releated parameter gets changed via details panel.
+2. Alterint the primitive scene proxy creation so that the newly created proxy reads from the newly created per object clip plane parameters while being created.
 
 <br></br>
 
@@ -373,9 +380,11 @@ and writes in itself as being created.
 </p>
 
 To learn more see _How Small Open Doors Can Lead to Better CPU Utilization and Bigger Games | Unreal Fest 2024_ (https://www.youtube.com/watch?v=JaCf2Qmvy18)
-
-Even though the main goal is to carry the information to the proxy while the proxy is being created it is obvious that the information should be carried from the component to the description,
-and then to the proxy from that description. 
+<br></br>
+The engine generated descriptions from components and use them as an intermediatery version of the source component. Then those descriptions are used to generate the proxies. 
+Descriptions are produced in game thread and consumed by the render thread hence providing race condition safe environment.
+Because of counter measurements we must first carry the information to the description and then carry those informations into proxy from the description. 
+<br></br>
 Happy news is that the process is basic, new variables are going to be created in the description and then the information is going to be stored in those variables, hence carrying the information to the 
 description is going to be done. Then the same is going to be done to carry the information to the proxies.
 
@@ -410,7 +419,7 @@ void FPrimitiveSceneProxyDesc::InitializeFromPrimitiveComponent(const UPrimitive
 
     InComponent->GetPerObjectClipPlane(InPerObjectClipPlane, InPerObjectClipPlaneDistance);
 
-    PerObjectClipPlane = FVector4(InPerObjectClipPlane, InPerObjectClipPlaneDistance);
+    PerObjectClipPlane = FVector4(InPerObjectClipPlane, -InPerObjectClipPlaneDistance);
 }
 
 `}
@@ -471,15 +480,17 @@ The general pipeline is very similar with the previous one. Inspect the followin
 
 ### Inducing the builder
 
-Since creating a FPrimitiveUniformBufferParameters of an object, which is going to be referred as uniform buffer of an object, is not a efficent
-thing to do every frame the engine follows an event based system. It creates the uniform buffer when a primitive proxy is craeted or when the uniform buffer
+Since creating a FPrimitiveUniformBufferParameters of an object, which is going to be referred as uniform buffer of an object, is not an efficent
+thing to do every frame the engine follows an event based system. It creates the uniform buffer when a primitive proxy is craeted or when a uniform buffer
 is marked as dirty , indicating a recent change in the proxy's state which concerns the GPU as well. 
 
 <br></br>
 
-The first one is handled by the engine but the second one is not. Since per object clip plane parameters are newly introduces the engine
-does not know that it should generate the uniform buffers for the object when those variables gets changed. 
+The first one is handled by the engine but the second requires a little bit extra. Since per object clip plane parameters are newly introduced the engine
+does not know that it should regenerate the uniform buffers of the object when those variables are changed. 
 
+<br></br>
+Therefore we need to tell the engine that when per-object clip plane parameters are changed it should regenerate the buffers.
 Luckly we are halfway there. Do you remember the functions that we call to notify the scene proxy about the changes made in the component,
 well it is time to revisit and define them.
 
@@ -489,7 +500,7 @@ Those functions were <CodeInline>SetPerObjectClipPlaneEnabled_GameThread(bool)</
 
 Notice, functions has _GameThread_ suffix. This is because these functions are designed to be called only in game thread. Their definitions
 are going to call their _RenderThread_ versions and then those functions are going to mutate the variables of the proxy. But additionally since 
-per-object clip plane releated  variables are also changed with that call it is a good place to let the engine know that it should update the
+per-object clip plane releated variables are also changed with that call it is a good place to let the engine know that it should update the
 uniform buffers. 
 
 <CodeBlock
@@ -602,22 +613,160 @@ the uniform buffer and sending the new buffer to the GPU. <CodeInline>RequirestU
 genereted by the proxy as dirty so that the engine updates or recreates it as soon as possisble. On the other hand <CodeInline>RequestGPUSceneUpdate</CodeInline>
 tells the engine to resend the uniform buffer generated for the proxy to the GPU.
 
-With those functionality being implemented it is time to change the way of the engine's buffer creation so that the bufffers includes the 
-properties defined by this implementation.
-
-<br></br>
-<br></br>
-<br></br>
 <br></br>
 
-<Notification emoji="U+1F4A1">
-  This is a tip. You can use **markdown** inside.
+With those functionalities being implemented the engine updates the buffers and sends them to the GPU everytime a cahnge is detected releated to the per-object clip plane parameters.
+But still it does know include our parameters into the buffers. Therefore we need to update the buffer creation code as well.
+
+As wit the other things the first thing to do is to create variables to write into, but this one is a little bit different.
+The first thing to do is to create a variable for the plane itself as an FVector4f. To do this we need to add a shader parameter to FPrimitiveUniformShaderParameters.
+
+<CodeBlock
+  code={`
+
+/** 
+* The uniform shader parameters associated with a primitive. 
+* Note: Must match FPrimitiveSceneData in shaders.
+* Note 2: Try to keep this 16 byte aligned. i.e |Matrix4x4|Vector3,float|Vector3,float|Vector4|  _NOT_  |Vector3,(waste padding)|Vector3,(waste padding)|Vector3. Or at least mark out padding if it can't be avoided.
+*/
+BEGIN_GLOBAL_SHADER_PARAMETER_STRUCT(FPrimitiveUniformShaderParameters,ENGINE_API)
+    SHADER_PARAMETER(uint32,		Flags) //We're going to get to this in a moment.
+    //...
+    SHADER_PARAMETER(float,			PixelProgrammableDistanceSquared)
+    SHADER_PARAMETER(float,			MaterialDisplacementFadeOutSize)
+    SHADER_PARAMETER(FUintVector2,	MeshPaintTextureDescriptor)
+    SHADER_PARAMETER(uint32,		NaniteRayTracingDataOffset)
+    SHADER_PARAMETER(float,			MaxWPOExtent)
+    SHADER_PARAMETER(uint32,		CustomStencilValueAndMask)
+    SHADER_PARAMETER(uint32,		VisibilityFlags)
+    SHADER_PARAMETER(FVector4f,     PerObjectClipPlane)  
+	  SHADER_PARAMETER_ARRAY(FVector4f, CustomPrimitiveData, [FCustomPrimitiveData::NumCustomPrimitiveDataFloat4s]) // Custom data per primitive that can be accessed through material expression parameters and modified through UStaticMeshComponent
+END_GLOBAL_SHADER_PARAMETER_STRUCT()
+`}
+  filename="PrimitiveUniformShaderParameters.h"
+/>
+
+<Notification>
+Notice, since this structure contains all the rendering releated information of a primitive component you can see all the different things here. The most interesting one is cutom primitive data.
+This is infact the primitive data that you can change inside the editor. It follows all the same path here into the shader parameters to be used in rendering.
 </Notification>
 
-<Notification emoji="U+26A0">
-  Warning: something important here.
-</Notification>
+The next thing to do is modifying the builder to write the plane information into the variable.
 
-<Notification emoji="⚠️">
-  You can also pass the emoji character directly.
-</Notification>
+<CodeBlock
+  code={`
+
+/** 
+* The uniform shader parameters associated with a primitive. 
+* Note: Must match FPrimitiveSceneData in shaders.
+* Note 2: Try to keep this 16 byte aligned. i.e |Matrix4x4|Vector3,float|Vector3,float|Vector4|  _NOT_  |Vector3,(waste padding)|Vector3,(waste padding)|Vector3. Or at least mark out padding if it can't be avoided.
+*/
+BEGIN_GLOBAL_SHADER_PARAMETER_STRUCT(FPrimitiveUniformShaderParameters,ENGINE_API)
+    SHADER_PARAMETER(uint32,		Flags) //We're going to get to this in a moment.
+    //...
+    SHADER_PARAMETER(float,			PixelProgrammableDistanceSquared)
+    SHADER_PARAMETER(float,			MaterialDisplacementFadeOutSize)
+    SHADER_PARAMETER(FUintVector2,	MeshPaintTextureDescriptor)
+    SHADER_PARAMETER(uint32,		NaniteRayTracingDataOffset)
+    SHADER_PARAMETER(float,			MaxWPOExtent)
+    SHADER_PARAMETER(uint32,		CustomStencilValueAndMask)
+    SHADER_PARAMETER(uint32,		VisibilityFlags)
+    SHADER_PARAMETER(FVector4f,     PerObjectClipPlane)  
+	  SHADER_PARAMETER_ARRAY(FVector4f, CustomPrimitiveData, [FCustomPrimitiveData::NumCustomPrimitiveDataFloat4s]) // Custom data per primitive that can be accessed through material expression parameters and modified through UStaticMeshComponent
+END_GLOBAL_SHADER_PARAMETER_STRUCT()
+`}
+  filename="PrimitiveUniformShaderParametersBuilder.h"
+/>
+
+<br></br>
+
+The first thing to do is adding the per object clip plane itself into the shader parameters. the order the parameter located is important because this structure represents the raw data hence it should
+be sync with the GPU side of the program. It makes it easy to put the parameter right before the custom primitive data array. 
+
+
+
+<CodeBlock
+  code={`
+
+/** 
+* The uniform shader parameters associated with a primitive. 
+* Note: Must match FPrimitiveSceneData in shaders.
+* Note 2: Try to keep this 16 byte aligned. i.e |Matrix4x4|Vector3,float|Vector3,float|Vector4|  _NOT_  |Vector3,(waste padding)|Vector3,(waste padding)|Vector3. Or at least mark out padding if it can't be avoided.
+*/
+BEGIN_GLOBAL_SHADER_PARAMETER_STRUCT(FPrimitiveUniformShaderParameters,ENGINE_API)
+    SHADER_PARAMETER(uint32,		Flags) 
+    //...
+    SHADER_PARAMETER(float,			PixelProgrammableDistanceSquared)
+    SHADER_PARAMETER(float,			MaterialDisplacementFadeOutSize)
+    SHADER_PARAMETER(FUintVector2,	MeshPaintTextureDescriptor)
+    SHADER_PARAMETER(uint32,		NaniteRayTracingDataOffset)
+    SHADER_PARAMETER(float,			MaxWPOExtent)
+    SHADER_PARAMETER(uint32,		CustomStencilValueAndMask)
+    SHADER_PARAMETER(uint32,		VisibilityFlags)
+    SHADER_PARAMETER(FVector4f,     PerObjectClipPlane)  
+	  SHADER_PARAMETER_ARRAY(FVector4f, CustomPrimitiveData, [FCustomPrimitiveData::NumCustomPrimitiveDataFloat4s]) // Custom data per primitive that can be accessed through material expression parameters and modified through UStaticMeshComponent
+END_GLOBAL_SHADER_PARAMETER_STRUCT()
+`}
+  filename="PrimitiveUniformShaderParameters.h"
+/>
+
+Notice that we did not add our <CodeInline>bPerObjectClipPlaneEnabled</CodeInline> flag here. The reason is optimization. Instead of allocating a boolean parameter for that it is going to 
+be stored inside of the general flag parameter which is allocated for this kind of one bit flags, see the first parameter *flags*.
+
+If you inspect the SceneDefinitions.h file you can see the flags located inside of the *Flags* parameter.
+
+<CodeBlock
+  code={`
+
+// Primitive scene data flags
+#define PRIMITIVE_SCENE_DATA_FLAG_CAST_SHADOWS								0x1
+#define PRIMITIVE_SCENE_DATA_FLAG_USE_SINGLE_SAMPLE_SHADOW_SL				0x2
+#define PRIMITIVE_SCENE_DATA_FLAG_USE_VOLUMETRIC_LM_SHADOW_SL				0x4
+#define PRIMITIVE_SCENE_DATA_FLAG_DECAL_RECEIVER							0x8
+
+#define PRIMITIVE_SCENE_DATA_FLAG_CACHE_SHADOW_AS_STATIC					0x10
+#define PRIMITIVE_SCENE_DATA_FLAG_OUTPUT_VELOCITY							0x20
+#define PRIMITIVE_SCENE_DATA_FLAG_DETERMINANT_SIGN							0x40
+#define PRIMITIVE_SCENE_DATA_FLAG_HAS_DISTANCE_FIELD_REPRESENTATION			0x80
+
+#define PRIMITIVE_SCENE_DATA_FLAG_HAS_CAPSULE_REPRESENTATION				0x100
+#define PRIMITIVE_SCENE_DATA_FLAG_HAS_CAST_CONTACT_SHADOW					0x200
+#define PRIMITIVE_SCENE_DATA_FLAG_HAS_PRIMITIVE_CUSTOM_DATA					0x400
+#define PRIMITIVE_SCENE_DATA_FLAG_LIGHTING_CHANNEL_0						0x800
+
+#define PRIMITIVE_SCENE_DATA_FLAG_LIGHTING_CHANNEL_1						0x1000
+#define PRIMITIVE_SCENE_DATA_FLAG_LIGHTING_CHANNEL_2						0x2000
+#define PRIMITIVE_SCENE_DATA_FLAG_HAS_INSTANCE_LOCAL_BOUNDS					0x4000
+#define PRIMITIVE_SCENE_DATA_FLAG_EVALUATE_WORLD_POSITION_OFFSET			0x8000
+
+#define PRIMITIVE_SCENE_DATA_FLAG_HAS_NANITE_IMPOSTER						0x10000
+#define PRIMITIVE_SCENE_DATA_FLAG_INSTANCE_DRAW_DISTANCE_CULL				0x20000
+#define PRIMITIVE_SCENE_DATA_FLAG_WPO_DISABLE_DISTANCE						0x40000
+#define PRIMITIVE_SCENE_DATA_FLAG_HAS_ALWAYS_EVALUATE_WPO_MATERIALS			0x80000
+
+#define PRIMITIVE_SCENE_DATA_FLAG_WRITES_CUSTOM_DEPTH_STENCIL				0x100000
+#define PRIMITIVE_SCENE_DATA_FLAG_DISABLE_MATERIAL_INVALIDATIONS			0x200000
+#define PRIMITIVE_SCENE_DATA_FLAG_HOLDOUT									0x400000
+#define PRIMITIVE_SCENE_DATA_FLAG_SPLINE_MESH								0x800000
+
+#define PRIMITIVE_SCENE_DATA_FLAG_SKINNED_MESH								0x1000000
+#define PRIMITIVE_SCENE_DATA_FLAG_INSTANCE_CULLING_OCCLUSION_QUERIES		0x2000000 // Whether per-instance occlusion queries are allowed when performing GPUScene instance culling
+#define PRIMITIVE_SCENE_DATA_FLAG_HAS_PIXEL_ANIMATION						0x4000000
+#define PRIMITIVE_SCENE_DATA_FLAG_RAYTRACING_FAR_FIELD						0x8000000
+
+#define PRIMITIVE_SCENE_DATA_FLAG_RAYTRACING_HAS_GROUPID					0x10000000
+#define PRIMITIVE_SCENE_DATA_FLAG_PER_CLUSTER_DISPLACEMENT_FALLBACK_RASTER	0x20000000
+#define PRIMITIVE_SCENE_DATA_FLAG_IS_FIRST_PERSON_PRIMITIVE					0x40000000
+#define PRIMITIVE_SCENE_DATA_FLAG_PER_OBJECT_CLIP_PLANE_ENABLED         	0x80000000 //Our lovely flag is here as the last element.
+
+`}
+  filename="SceneDefinitions.h"
+/>
+
+You can see other flags here as well. These macros is used to represent the bit location of the flag and we placed our flag to the first available bit.
+
+
+
+<br></br>
+<br></br>
+<br></br>
