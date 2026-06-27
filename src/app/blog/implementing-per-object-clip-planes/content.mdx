@@ -1,4 +1,6 @@
-# Implementing Per-Object Clip Planes in Unreal Engine 5
+## Introduction
+
+### The problem with global clip planes
 
 In modern real-time rendering, specialized visual effects, gameplay mechanics, and visualization tools often require geometry to be dynamically clipped.
 While Unreal Engine 5 provides robust support for global clip planes—typically utilized for planar water reflections—it lacks out-of-the-box support 
@@ -6,15 +8,26 @@ for isolating this behavior on a per-object basis.
 
 <br></br>
 
+When global clip planes are enabled, Unreal uses one of the hardware's clip-distance slots to discard vertices before rasterization. The plane's position 
+and orientation are defined per camera, which is exactly what you want for reflections—but it applies uniformly to everything that camera draws. 
+Different cameras can carry different global planes, yet within a single view every primitive shares the same cutting boundary. That global scope is 
+the bottleneck we are working around.
+
+<br></br>
+
+Multiple clip distances can be active at once, and modern APIs typically expose six to eight of them. Our implementation occupies a *different* slot 
+than the engine's global clip plane so both can coexist: water reflections keep their camera-driven plane, while individual objects can carry their own.
+
+### The power of isolating geometry slicing per primitive
+
 Implementing per-object clip planes allows developers to slice, hollow out, or selectively cull geometry on specific primitives without affecting adjacent elements in the scene.
 This capability is crucial for applications ranging from architectural visualizations and medical imaging to sci-fi cross-section shaders.
 
 <br></br>
-Multiple clip planes can be supported at the same time, and this implementation uses one of them just like Unreal Engine's natively supported
-global clip planes. When global clip planes are enabled unreal uses a one of many clip planes to clip vertices out of the screen and the 
-position as well as the direction of the plane is defined per camera bases. This implementation makes the same but uses the another
-clip plane (in order to coexist with global clip plane) and the properties of the clip plane changes per object basis hence allows the user to
-set custom clip planes by object.
+
+The aim is to extend Unreal's existing global clip-plane machinery by defining the plane used to derive clip distances on a per-object basis, so each 
+primitive can expose its own cutting boundary. Same hardware feature, same dot-product math—just a second lane of control that artists and gameplay 
+code can drive independently.
 
 <br></br>
 
@@ -30,6 +43,8 @@ Before diving into how to implement the clip plane it is required to understand 
 <br></br>
 
 ## What Are Clip Planes And Where to Find Them
+
+### Hardware-Level Clipping (Registers & Rasterizers)
 
 In computer graphics, the hardware uses some additional set of distances determine wheter a vertex should be clipped out.
 Rather than relying solely on software-side algorithms, modern graphics APIs (such as DirectX, Vulkan, and OpenGL) natively reserve
@@ -69,7 +84,7 @@ rather then the global clip plane so that it can be used with the global clip pl
 
 <br></br>
 
-### Plane Representation
+### The Math: Compact Plane Representation
 
 <br></br>
 
@@ -114,7 +129,9 @@ form creates some unique and effective ways to make plane-point test. We will ge
 
 
 <br></br>
-### Evaluating Point-Plane Distance
+
+### Evaluating Point-Plane Distance (The Magic Dot Product)
+
 <br></br>
 
 When it comes to clipping vertices along some plane, it is unavoidable to perform the plane-line distance calculation.
@@ -165,7 +182,9 @@ The right-hand operand is the query point represented as a homogeneous 4D vector
 The dot product of these two vectors directly yields the signed distance of $\vec{Q}$ from the plane. 
 
 <br></br>
-## Implementing Per-Object Clip Plane
+
+## Step 1: The Game Thread (Defining the Source Data)
+
 <br></br>
 
 Per object clip plane implementation requires to modify the engine source code to allow information flow all the way from
@@ -180,7 +199,7 @@ thread and eventually to the GPU.
 
 <br></br>
 
-### From The Start : Defining The Variables
+### Extending UPrimitiveComponent
 
 Primitive component is the base class of any componet that has a volume in the game world. Inserting the information
 required for the per-object clip plane implementation here allows the feature to work with all types of meshes and other primitives
@@ -227,6 +246,8 @@ class UPrimitiveComponent : public USceneComponent ....
 `}
   filename="PrimitiveComponent.h"
 />
+
+### Exposing Blueprints & Handling Runtime Modifications
 
 These properties are going to be changed both at editor time and runtime. To allow runtime modifcation
 by the users we need to add functions that will allow them to change the values. These functions are going to be
@@ -279,6 +300,7 @@ void UPrimitiveComponent::SetPerObjectClipPlaneEnabled(bool bValue)
 
         if (SceneProxy)
         {
+            //To be implemented
             SceneProxy->SetPerObjectClipPlaneEnabled_GameThread(bValue);
         }
     } 
@@ -292,11 +314,14 @@ void UPrimitiveComponent::SetPerObjectClipPlane(const FVector& PlaneNormal, floa
     PerObjectClipPlaneDistance = PlaneDistance;
     
     if (bShouldUpdate && SceneProxy)
+        //To be implemented
         SceneProxy->SetPerObjectClipPlane_GameThread(FVector4(PerObjectClipPlaneNormal.GetSafeNormal(), -PerObjectClipPlaneDistance));
 }
 `}
   filename=""
 />
+
+### Keeping the Editor Happy: Overriding PostEditChangeProperty
 
 If you are after this kind of implementation it is a high probability that you already know what are scene proxies and where they
 are located in the scene hierarch of the unreal but it is worth explaing them shortly anyways. Scene proxies are the render thread representations of 
@@ -323,7 +348,7 @@ The main nuance while notifying the proxy from the changes is that if one change
 Therefore it is required to modify the engine code to do the followings :
 
 1. Force the engine to recreate the scene proxy of the component when a per-object clip plane releated parameter gets changed via details panel.
-2. Alterint the primitive scene proxy creation so that the newly created proxy reads from the newly created per object clip plane parameters while being created.
+2. Altering the primitive scene proxy creation so that the newly created proxy reads from the newly created per object clip plane parameters while being created.
 
 <br></br>
 
@@ -372,7 +397,7 @@ void UPrimitiveComponent::PostEditChangeProperty(...)
   filename="PrimitiveComponent.cpp"
 />
 
-### Providing Component-Proxy Alignment
+## Step 2: The Cross-Thread Bridge (Component-to-Proxy Alignment)
 
 With the first step being done all it is require to change the scene proxy creation path so that is reads the information that is defined in the component
 and writes in itself as being created.
@@ -386,9 +411,16 @@ To learn more see _How Small Open Doors Can Lead to Better CPU Utilization and B
 The engine generated descriptions from components and use them as an intermediatery version of the source component. Then those descriptions are used to generate the proxies. 
 Descriptions are produced in game thread and consumed by the render thread hence providing race condition safe environment.
 Because of counter measurements we must first carry the information to the description and then carry those informations into proxy from the description. 
+
+### The Safe-Pass: FPrimitiveSceneProxyDesc
+
+Think of <CodeInline>FPrimitiveSceneProxyDesc</CodeInline> as a photocopy of the component made on the game thread: lightweight, immutable for the handoff, and safe to read when the render thread builds proxies. 
+We extend the description first so clip-plane data crosses the thread boundary in the same pattern Unreal already uses for bounds, flags, and material relevance.
+
 <br></br>
+
 Happy news is that the process is basic, new variables are going to be created in the description and then the information is going to be stored in those variables, hence carrying the information to the 
-description is going to be done. Then the same is going to be done to carry the information to the proxies.
+description is going to be done.
 
 <CodeBlock
   code={`
@@ -428,7 +460,12 @@ void FPrimitiveSceneProxyDesc::InitializeFromPrimitiveComponent(const UPrimitive
   filename=""
 />
 
-Then the same for the proxies.
+### The Shadow Object: FPrimitiveSceneProxy
+
+Once the description arrives on the render thread, <CodeInline>FPrimitiveSceneProxy</CodeInline> becomes the long-lived "shadow" of the component—still on the CPU, but owned by rendering. 
+The proxy constructor simply mirrors what we already packed into the desc; from here on, render-thread code reads clip-plane state from the proxy, not from the live component.
+
+<br></br>
 
 <CodeBlock
   code={`
@@ -461,7 +498,7 @@ FPrimitiveSceneProxy::FPrimitiveSceneProxy(const FPrimitiveSceneProxyDesc& InPro
   filename=""
 />
 
-### Inducing the builder
+## Step 3: The GPU Scene Pipeline (Inducing the Builder)
 
 With that being the all the implementation required to carry the information from the game thread to the proxies at the render thread is done.
 
@@ -482,8 +519,6 @@ The general pipeline is very similar with the previous one. Inspect the followin
   <img src="/blog/implementing-per-object-clip-planes/Image_BuilderInformationFlow.svg" alt="Plane"></img>
 </p>
 
-
-
 Since creating a FPrimitiveUniformBufferParameters of an object, which is going to be referred as uniform buffer of an object, is not an efficent
 thing to do every frame the engine follows an event based system. It creates the uniform buffer when a primitive proxy is craeted or when a uniform buffer
 is marked as dirty , indicating a recent change in the proxy's state which concerns the GPU as well. 
@@ -493,7 +528,8 @@ is marked as dirty , indicating a recent change in the proxy's state which conce
 The first one is handled by the engine but the second requires a little bit extra. Since per object clip plane parameters are newly introduced the engine
 does not know that it should regenerate the uniform buffers of the object when those variables are changed. 
 
-<br></br>
+### Thread-Safe Communication via ENQUEUE_RENDER_COMMAND
+
 Therefore we need to tell the engine that when per-object clip plane parameters are changed it should regenerate the buffers.
 Luckly we are halfway there. Do you remember the functions that we call to notify the scene proxy about the changes made in the component,
 well it is time to revisit and define them.
@@ -623,8 +659,9 @@ With those functionalities being implemented the engine updates the buffers and 
 But still it does not include our parameters into the buffers. Therefore we need to update the buffer creation code as well.
 This part is a little bir confusing, not because it is complet but rather it requires to make changes at multiple places.
 
-<br></br>
-Let's tackle this problem step by step. Our first step is to write the info of a primitive components usage of per-object clip plane.
+### Claiming Our Bitmask Flag in SceneDefinitions.h
+
+Let's tackle the flag first. Our first step is to record whether a primitive actually uses a per-object clip plane.
 We need to allocate some place to put our flag in. Luckly the FPrimitiveUniformShaderParameters structure already allocates one for us. 
 The parameter struct defines the set of parameters that which constitude the structure. The first parameter is <CodeInline>Flags</CodeInline>.
 This parameter is crucial for our implementation. The engine does not direclty send boolean parameters into the GPU since it is a waste of space to send 
@@ -775,9 +812,11 @@ void FPrimitiveSceneProxy::BuildUniformShaderParameters(FPrimitiveUniformShaderP
   filename="PrimitiveSceneProxy.cpp"
 />
 
-#### PerObjectCLipPlaneVar
+### Expanding FPrimitiveUniformShaderParameters
 
-The next step is to update the buffers so that they can contain the plane value.
+The flag tells the GPU *whether* to clip; we still need a home for the plane itself. The next step is to extend the uniform parameter struct, bump the GPU-scene stride, and wire the builder so the compact <CodeInline>FVector4f</CodeInline> representation we derived earlier rides along with every primitive draw.
+
+<br></br>
 
 <CodeBlock
   code={`
@@ -857,8 +896,12 @@ void FPrimitiveSceneProxy::BuildUniformShaderParameters(FPrimitiveUniformShaderP
   filename="PrimitiveSceneProxy.cpp"
 />
 
+### Packing the GPU Payload in Setup()
 
-### Setup
+CPU-side structs and builders are only half the contract—the GPU reads a flat float4 array laid out by <CodeInline>FPrimitiveSceneShaderData::Setup</CodeInline>. 
+We pin <CodeInline>PerObjectClipPlane</CodeInline> at index 34 and shift custom primitive data to start at 35, keeping the packing in sync with what <CodeInline>SceneData.ush</CodeInline> will expect on the shader side.
+
+<br></br>
 
 <CodeBlock
   code={`
@@ -902,3 +945,23 @@ void FPrimitiveSceneShaderData::Setup(const FPrimitiveUniformShaderParameters& P
 `}
   filename="PrimitiveUniformShaderParameters.cpp"
 />
+
+## Step 4: The Finishing Touch—Shader Modifications (HLSL Stage)
+
+At this point the clip plane lives in GPU memory, patiently waiting to do its job. The CPU side of the house is in order; what remains is teaching the vertex shader to read that packed data and write a clip distance the rasterizer understands. This is where our earlier dot-product math pays off—we already know exactly what value to emit.
+
+### Intercepting Primitive Data in SceneData.ush
+
+Unreal centralizes per-primitive fetches in <CodeInline>SceneData.ush</CodeInline>. Any shader that calls <CodeInline>GetPrimitiveData</CodeInline> expects a stable layout: the flag bit we claimed in <CodeInline>SceneDefinitions.h</CodeInline> and the float4 at stride index 34 must be mirrored here so HLSL sees the same contract the C++ <CodeInline>Setup()</CodeInline> function wrote. We extend the struct and accessor helpers so materials and vertex factories can query <CodeInline>PerObjectClipPlane</CodeInline> without bespoke uniform slots.
+
+<br></br>
+
+*(Shader-side struct and accessor changes for <CodeInline>SceneData.ush</CodeInline>—to be documented in the next pass.)*
+
+### Injecting the Clip Distance into the Vertex Shader (PositionShader.usf)
+
+Finally, the vertex shader must output the hardware clip distance when the per-object flag is set—typically a second clip distance index so the engine's global plane keeps its slot. In <CodeInline>PositionShader.usf</CodeInline> (and the relevant vertex factory paths), we evaluate the same dot product derived in the math section, guard it behind the flag bitmask, and assign the result to the appropriate <CodeInline>OutClipDistance</CodeInline> semantic. Flip the normal if your art direction wants the opposite half-space clipped; the math does not care, but your level designers might.
+
+<br></br>
+
+*(Vertex shader clip-distance output—<CodeInline>PositionShader.usf</CodeInline> modifications to be documented in the next pass.)*
