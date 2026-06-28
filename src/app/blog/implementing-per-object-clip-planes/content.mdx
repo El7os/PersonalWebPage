@@ -1,37 +1,41 @@
-## Introduction
-
-### The problem with global clip planes
-
+## - Introduction
+<br></br>
+### - The problem with global clip planes
+<br></br>
 In modern real-time rendering, specialized visual effects, gameplay mechanics, and visualization tools often require geometry to be dynamically clipped.
-While Unreal Engine 5 provides robust support for global clip planes—typically utilized for planar water reflections—it lacks out-of-the-box support 
-for isolating this behavior on a per-object basis.
+While Unreal Engine 5 provides robust support for global clip planes—typically utilized for planar water reflections—it 
+lacks out-of-the-box support for isolating this behavior on a per-object basis.
 
 <br></br>
 
-When global clip planes are enabled, Unreal uses one of the hardware's clip-distance slots to discard vertices before rasterization. The plane's position 
-and orientation are defined per camera, which is exactly what you want for reflections—but it applies uniformly to everything that camera draws. 
-Different cameras can carry different global planes, yet within a single view every primitive shares the same cutting boundary. That global scope is 
-the bottleneck we are working around.
+When global clip planes are enabled, Unreal Engine uses one of the hardware's clip-distance slots to discard vertices before rasterization.
+The plane's position and orientation are defined per camera, which is ideal for reflections; however, this applies uniformly 
+to every object that the camera draws. While different cameras can carry different global planes, every primitive within a single 
+view shares the same cutting boundary. This global scope is the exact bottleneck our implementation addresses.
 
 <br></br>
 
-Multiple clip distances can be active at once, and modern APIs typically expose six to eight of them. Our implementation occupies a *different* slot 
-than the engine's global clip plane so both can coexist: water reflections keep their camera-driven plane, while individual objects can carry their own.
-
-### The power of isolating geometry slicing per primitive
-
-Implementing per-object clip planes allows developers to slice, hollow out, or selectively cull geometry on specific primitives without affecting adjacent elements in the scene.
-This capability is crucial for applications ranging from architectural visualizations and medical imaging to sci-fi cross-section shaders.
+Multiple clip distances can be active simultaneously, and modern graphics APIs typically expose six to eight slots.
+Our implementation occupies a different slot than the engine's global clip plane so that both can coexist: water reflections 
+retain their camera-driven plane, while individual objects can carry their own.
 
 <br></br>
 
-The aim is to extend Unreal's existing global clip-plane machinery by defining the plane used to derive clip distances on a per-object basis, so each 
-primitive can expose its own cutting boundary. Same hardware feature, same dot-product math—just a second lane of control that artists and gameplay 
-code can drive independently.
+Implementing per-object clip planes allows developers to slice, hollow out, or selectively cull geometry on specific primitives without 
+affecting adjacent elements in the scene. This capability is crucial for applications ranging from architectural visualizations and medical 
+imaging to sci-fi cross-section effects.
 
 <br></br>
 
-Before diving into how to implement the clip plane it is required to understand how clip planes work.
+The goal is to extend Unreal Engine's existing global clip-plane architecture by defining the plane used to derive clip distances 
+on a per-object basis, enabling each primitive to expose its own independent cutting boundary. This utilizes the same underlying 
+hardware feature and identical dot-product mathematics, but introduces a separate control lane that artists and gameplay systems 
+can drive independently.
+
+<br></br>
+
+To understand how to inject this custom logic into the rendering pipeline, we must first look at how the hardware handles 
+clipping boundaries under the hood.
 
 <br></br>
 
@@ -42,53 +46,61 @@ Before diving into how to implement the clip plane it is required to understand 
 
 <br></br>
 
-## What Are Clip Planes And Where to Find Them
-
-### Hardware-Level Clipping (Registers & Rasterizers)
-
-In computer graphics, the hardware uses some additional set of distances determine wheter a vertex should be clipped out.
-Rather than relying solely on software-side algorithms, modern graphics APIs (such as DirectX, Vulkan, and OpenGL) natively reserve
-specialized hardware registers for these clip distances—typically supporting a minimum of 6 to 8 at the same time.
+## - What Are Clip Planes And Where to Find Them
 
 <br></br>
 
-During the vertex processing stage of the rendering pipeline, the hardware evaluates the calculated distance value and checks if  
-a vertex yields a negative result. If it does then the hardware rasterizer clips the primitive along this boundary, cleanly discarding the non-visible fragments before they ever reach the pixel shader.
-Basically all it does is checking the values of each supported clip distances and clipping the vertex if at least one of the distance values is below zero.
+
+<br></br>
+In computer graphics, the hardware relies on a dedicated set of distances to determine whether a vertex should be clipped.
+Rather than executing software-side culling algorithms, modern graphics APIs (such as DirectX, Vulkan, and OpenGL) natively 
+utilize specialized hardware registers allocated for these clip distances—typically supporting a minimum of six to eight simultaneously.
 
 <br></br>
 
-Generally, developers uses plane to derive that clip distance value. An arbitrary plane gets selected and distance value is set to the 
-distance of the queryied vertex from that plane. If the point is lying on the sane side of the plane with the plane normal
-the distance sign is negative and if not then otherwise.
+During the vertex processing stage of the rendering pipeline, the hardware evaluates these calculated distance values.
+If a vertex yields a negative clip distance, the hardware rasterizer clips the primitive along this boundary, cleanly discarding non-visible
+fragments before they ever reach the pixel shader. Essentially, the hardware monitors each active clip distance slot and discards the vertex
+if even a single distance value falls below zero.
+
+<br></br>
+
+Generally, developers use a plane equation to derive this clip distance value. An arbitrary plane is defined, and the clip distance
+is calculated as the signed distance from the vertex to that plane. If the vertex lies in the positive half-space—the side the plane
+normal points toward—the distance value is positive and the geometry is preserved. Conversely, if it lies on the opposite side, the distance
+value becomes negative, triggering the hardware to clip the vertex.
 
 <MathBlock
   latex="Clip Distance = SignedDistanceToPlane(Q)"
   caption="Setting the clip distnace to the distance of point Q to a plane"
   size="large"
 />
-Since it is an often practised implementation to use planes to derive those clip distances, these kind of implementations are often referred as "clip planes".
+
+
+Because using a plane equation to derive these values is the industry-standard approach, this hardware feature is universally referred to as "clip planes."
 
 <br></br>
 
-Nativally Unreal Engine supports global clip plane feature and when this feature is enabled the engine checks each vertex against a plane
-defined per-camera basis to derive clip distance values. The name "global" is referring to its being global for each object displayed by 
-the same camera. Notice, different cameras can have different global clip planes. 
+Out of the box, Unreal Engine supports a global clip plane feature. When enabled, the engine evaluates every vertex against a single 
+plane defined on a per-camera basis to derive its clip distance. The term "global" reflects the fact that this
+boundary applies uniformly to every object rendered by that specific camera—though different cameras can maintain entirely distinct
+global clip planes.
 
 <br></br>
 
-The aim of this implementation is to extend the global clip plane support to per object clip plane, by basically doing the same 
-but defining the clip plane used to derive clip distances per object basis so that each object can have a different clip plane.
-Since there graphics api's supports multiple clip distances to be used at the same time we are going to use a different clip distnace
-rather then the global clip plane so that it can be used with the global clip plane as well.
+The goal of our implementation is to extend this capability to a per-object basis. We will leverage the exact same
+underlying hardware mechanics, but define the clip plane dynamically per primitive so that individual objects can maintain
+their own unique cutting boundaries. Since modern graphics APIs support multiple concurrent clip distances, we can assign our
+custom per-object plane to a completely separate hardware slot. This ensures our implementation can seamlessly coexist with the
+engine's native global clip plane.
 
 <br></br>
 
-### The Math: Compact Plane Representation
+### - The Math: Compact Plane Representation
 
 <br></br>
 
-Mathematically, an infinite plane is defined as the following
+Mathematically, an infinite plane is defined by the following equation:
 
 <MathBlock
   latex="\vec{N} \cdot (\vec{P} - \vec{P}_0) = 0"
@@ -96,7 +108,7 @@ Mathematically, an infinite plane is defined as the following
   size="large"
 />
 
-Where $\vec{N}$ is the normal vector of the plane and $\vec{P}_0$ is an arbitrary point lying on the plane.
+Where $\vec{N}$ is the surface normal vector of the plane and $\vec{P}_0$ is an arbitrary point lying on that plane.
 
 <br></br>
 
@@ -106,9 +118,9 @@ Where $\vec{N}$ is the normal vector of the plane and $\vec{P}_0$ is an arbitrar
 
 <br></br>
 
-From that equation it can be deduced that two <CodeInline>FVector3f</CodeInline>s are required to represent a 3D plane in world space. 
-But it is possible to represent a 3D plane in more compact form. A plane can be represented by one <CodeInline>FVector4f</CodeInline> if 
-the arbitrary point $\vec{P}_0$ is selected as the following :
+From this equation, it can be deduced that two <CodeInline>FVector3f</CodeInline>s are required to represent a 3D plane in world space. 
+However, it is possible to express a plane in a much more compact form. A 3D plane can be fully defined by a single <CodeInline>FVector4f</CodeInline> if 
+if we define $\vec{P}_0$ relative to the world origin using the signed distance $D_p$:
 
 <MathBlock
   latex="\vec{P}_0 = D_p * \vec{N}"
@@ -116,39 +128,51 @@ the arbitrary point $\vec{P}_0$ is selected as the following :
   size="large"
 />
 
-Geometrically, it means to select the arbitarary point $\vec{P}_0$ as the point where the normal vector $\vec{N}$ intersects with the plane itself.
+Geometrically, this approach defines $\vec{P}_0$ aGeometrically, this approach defines $\vec{N}$ intersects the plane surface.
 
 <p align="center">
   <img src="/blog/implementing-per-object-clip-planes/Image_Plane_WithWorldOrigin.svg" alt="PlaneWithWorldOrigin"></img>
 </p>
 
-Under this condition a plane can be represented by storing the normal vector $\vec{N}$ as the first three elements of the <CodeInline>FVector4f</CodeInline>
-and the distance $D_p$ as the last element.
-This compact representation reduces the memory footprint of the plane by two floating points. Additionally, representing a plane in this
-form creates some unique and effective ways to make plane-point test. We will get to that in a moment.
-
+Under this condition, the plane is elegantly represented by storing the components 
+of the normal vector $\vec{N}$ in the first three elements $(X, Y, Z)$ of the <CodeInline>FVector4f</CodeInline>,
+and the scalar distance $D_p$ in the final $W$ component.
 
 <br></br>
 
-### Evaluating Point-Plane Distance (The Magic Dot Product)
+This compact representation reduces the memory footprint of a plane by two floating-point
+values. Furthermore, expressing a plane in this 4D vector format unlocks highly efficient
+methods for performing plane-point distance tests, which we will explore next.
+<br></br>
+
+### - Evaluating Point-Plane Distance (The Magic Dot Product)
 
 <br></br>
 
-When it comes to clipping vertices along some plane, it is unavoidable to perform the plane-line distance calculation.
-There are multiple ways and interpretations to it but one spesific interpretation becomes handy in this type of implementation.
-<br></br>
-It is a good practice to start a mathmatical problem by defining clear variable and goal definitions. 
-* $\vec{Q}$ is the point of interest, the location of the vertex.
-* $D_Q$ is the signed distance of the query point $\vec{Q}$ from the clipping plane and it is going to be refered as clip distance from now on. The main goal is to find this value.
-* $D_P$ is the distance value satisfying the equation $\vec{P}_0 = D_P * \vec{N}$. In other words, the distance of the plane along the normal vector of the plane in world space.
+When clipping vertices along a plane, calculating the signed distance from a point to that
+plane is an unavoidable necessity. While there are multiple ways to interpret this mathematically,
+one specific geometric interpretation proves incredibly elegant for our implementation.
 
 <br></br>
 
-Note that the shortest distance from a point to a plane is measured along the direction perpendicular to
-the plane.
-Because the plane normal is perpendicular to the plane, $D_Q​$ can be computed by projecting the query point onto the plane normal. 
-The difference between the projected distance of the query point and the plane's distance from the origin gives the signed distance $D_Q$.
-The geometric interpretation is shown below:
+To ground this concept in our rendering pipeline, we can establish a clean mathematical
+framework by defining a few key variables and our ultimate objective:
+
+* $\vec{Q}$: The point of interest (the vertex position in world space).
+* $D_Q$: The signed distance of the query point $\vec{Q}$ from the clipping plane,
+  which we will refer to as the clip distance moving forward. Our primary goal is to solve for this value.
+* $D_P$: The scalar distance satisfying the equation $\vec{P}_0 = D_P \cdot \vec{N}$. In other words, it represents the signed perpendicular distance of the plane from the world origin along the normal vector.
+
+<br></br>
+
+The shortest distance from an arbitrary point to a plane is always measured along a path perpendicular to that plane. Because the plane normal $\vec{N}$ is by definition perpendicular
+to the surface, $D_Q$ can be computed by projecting the query point $\vec{Q}$ onto the plane
+normal. The difference between this projected distance and the plane's own distance from 
+the origin ($D_P$) yields the exact signed distance $D_Q$.
+
+<br></br>
+
+The geometric interpretation is illustrated below:
 
 <br></br>
 
@@ -156,7 +180,7 @@ The geometric interpretation is shown below:
   <img src="/blog/implementing-per-object-clip-planes/Image_Plane_Distance.svg" alt="Plane"></img>
 </p>
 
-Therefore :
+Therefore, the relationship can be expressed as:
 
 <MathBlock
   latex="D_Q = \vec{Q} \cdot \vec{N} - D_P"
@@ -164,7 +188,7 @@ Therefore :
   size="large"
 />
 
-By arranging the equation a little bit something magneficent can reveal
+By expanding and slightly rearranging this equation, a magnificent algebraic shorthand reveals itself:
 
 <MathBlock
   latex="\begin{align*}
@@ -176,20 +200,28 @@ By arranging the equation a little bit something magneficent can reveal
   size="large"
 />
 
-Computing the distance of the point $\vec{Q}$ from the plane becomes as trivial as evaluating the dot product of two vectors.
-Notice that the left-hand operand is almost identical to the 4D vector representation of the plane, except that the distance term is negated.
-The right-hand operand is the query point represented as a homogeneous 4D vector, obtained by appending a 1 as the fourth component.
-The dot product of these two vectors directly yields the signed distance of $\vec{Q}$ from the plane. 
+With this formulation, computing the distance of point $\vec{Q}$ from the plane 
+becomes as trivial as evaluating a single 4D dot product.
 
 <br></br>
 
-## Step 1: The Game Thread (Defining the Source Data)
+Notice that the left-hand operand is almost identical to our previously discussed 4D 
+vector representation of the plane, with the minor exception that the distance 
+term $D_P$ is negated. The right-hand operand is simply the query point represented 
+as a homogeneous 4D coordinate, obtained by appending $1$ as its $W$ component. 
+Evaluating the dot product of these two 4D vectors directly yields the signed clip 
+distance of $\vec{Q}$.
 
 <br></br>
 
-Per object clip plane implementation requires to modify the engine source code to allow information flow all the way from
-a simple UPrimitiveComponent to necessary shaders. Along this way the information is required to be carried over from the game thread to the render
-thread and eventually to the GPU.
+
+## - Implementation
+
+Bridging the gap between gameplay code and raw hardware clipping requires establishing a unified, 
+sequential data pipeline that stretches all the way from UPrimitiveComponent down to our low-level shaders.
+We will follow a top-down approach—tracing the data's journey sequentially through
+the engine's architectural layers. Along this path, our primary task is to safely ferry our parameters across the asynchronous 
+Game Thread/Render Thread barrier without risking race conditions, and pack them neatly across the CPU-to-GPU memory interface. 
 
 <br></br>
 
@@ -199,21 +231,36 @@ thread and eventually to the GPU.
 
 <br></br>
 
-### Extending UPrimitiveComponent
 
-Primitive component is the base class of any componet that has a volume in the game world. Inserting the information
-required for the per-object clip plane implementation here allows the feature to work with all types of meshes and other primitives
-that inherits from primitive component.
+## Step 1: The Game Thread (Defining the Source Data)
 
 <br></br>
 
-Only three informations are requred:
-* A boolean flag indicating that whether the component has a per-object clip plane
-* A <CodeInline>FVector</CodeInline> representing the normal vector of the clip plane in world space 
-* A floating point representing the distance of the clip plane from the world center in world space
+### Extending UPrimitiveComponent
 
-Since this part of the implementation is going to be exposed to general users it's worth making it simple
-and explanatory.    
+<br></br>
+
+The UPrimitiveComponent is the base class for any component that possesses a visual 
+representation or physical volume in the game world. Integrating the data required 
+for our per-object clip plane at this level ensures that the feature automatically 
+works with static meshes, skeletal meshes, and any other custom primitives that inherit
+from this base class.
+
+<br></br>
+
+To support this feature, we only need to store three pieces of information:
+
+* A boolean flag indicating whether the component has an active per-object clip plane.
+
+* An FVector3f representing the surface normal vector of the clip plane in world space.
+
+* A floating-point value representing the signed perpendicular distance of the clip plane from the world origin.
+
+<br></br>
+
+Because this structural data will eventually be exposed to technical artists and designers
+in the editor, it is worth keeping the interface intuitive, self-explanatory, and 
+well-documented within the details panel.
 
 <CodeBlock
   code={`
@@ -246,12 +293,16 @@ class UPrimitiveComponent : public USceneComponent ....
 `}
   filename="PrimitiveComponent.h"
 />
-
+<br></br>
 ### Exposing Blueprints & Handling Runtime Modifications
-
+<br></br>
 These properties are going to be changed both at editor time and runtime. To allow runtime modifcation
-by the users we need to add functions that will allow them to change the values. These functions are going to be
-exposed to the blueprint system so that users can use them in their blueprint scripts as well.
+These properties must support modifications both at edit time within the editor and dynamically
+at runtime. To enable runtime modification, we need to implement public setter functions
+that allow developers to safely update these values. By exposing these functions to 
+the Blueprint visual scripting system, gameplay programmers and technical artists can 
+easily drive and animate the clipping plane directly from their gameplay scripts.
+
 <Notification>
 Yes I wrote this system before Unreal Engine 6.
 </Notification>
@@ -321,17 +372,31 @@ void UPrimitiveComponent::SetPerObjectClipPlane(const FVector& PlaneNormal, floa
   filename=""
 />
 
+SetPerObjectClipPlane_GameThread and SetPerObjectClipPlaneEnabled_GameThread function are not implemented yet
+but they are placed here for the sake of completeness. We are going to define them in a moment.
+
+Even though these setters do not exist their primary purpose is to notify the render-thread 
+representation of our primitive about the changes made on the game-thread. By invoking them we 
+are adressing the component-proxy alignment problem for runtime.
+
+
+<Notification emoji ="❓">
+A Scene Proxy (specifically FPrimitiveSceneProxy) is the render-thread representation 
+of a UPrimitiveComponent. Because Unreal Engine strictly separates simulation logic
+from rendering logic to maximize performance, the game thread (where components live)
+cannot safely access or modify rendering state directly. Instead, the render thread
+communicates with the game world through these proxies. They mirror the essential visual
+data of a component, providing a thread-safe snapshot that the renderer can query and
+process without blocking gameplay execution.
+</Notification>
+
+
+
 ### Keeping the Editor Happy: Overriding PostEditChangeProperty
 
-If you are after this kind of implementation it is a high probability that you already know what are scene proxies and where they
-are located in the scene hierarch of the unreal but it is worth explaing them shortly anyways. Scene proxies are the render thread representations of 
-scene components. Render thread comminucates with the game world through them and visa versa. Even though the functions called inside of the setter functions do not exists 
-at this time (they are going to defined shortly after) the main intention is updating the scene representation of our primitives about the
-changes made on the owner component. Thus we make both aligned to each other. 
-
 <br></br>
-
-Even though this solves the runtime modification of the clip plane parameters the same is not true for the editor mode.
+ 
+Even though implementing setter function solves the runtime modification of the clip plane parameters the same is not true for the editor mode.
 It is required to listen the changes made in the details panel while in editor mode and reflect those changes to the scene proxies as well.
 
 <Notification emoji="U+1F4A1"> 

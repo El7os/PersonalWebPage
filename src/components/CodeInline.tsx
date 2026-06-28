@@ -18,9 +18,14 @@ export default function CodeInline({ code, children }: CodeInlineProps) {
             className="code-inline"
             style={{
                 color: '#E06C75',
-                fontFamily: 'var(--font-mono)',
-                fontSize: '0.92em',
+                backgroundColor: 'rgba(255, 255, 255, 0.08)',
+                border: '1px solid rgba(255, 255, 255, 0.05)',
+                borderRadius: '5px',
+                padding: '0.15em 0.35em',
+                fontFamily: 'var(--font-mono), "JetBrains Mono", "Fira Code", "Cascadia Code", "Consolas", "Menlo", monospace',
+                fontSize: '0.9em',
                 letterSpacing: '0.01em',
+                wordBreak: 'break-word',
             }}
         >
             {text}

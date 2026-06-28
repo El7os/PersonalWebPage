@@ -10,7 +10,7 @@ export const metadata: Metadata = {
 export default function Page() {
   return (
     <BlogLayout>
-      <article style={{ maxWidth: '860px', margin: '0 auto', padding: '2rem' }}>
+      <article className="blog-content" style={{ maxWidth: '860px', margin: '0 auto', padding: '2rem' }}>
         <Content />
       </article>
     </BlogLayout>
