@@ -182,6 +182,10 @@ the distance of point $\vec{Q}$ from the clip plane is as trivial as evaluating 
 represented as a homogeneous 4D coordinate.
 
 
+
+
+
+
 ## - Implementation
 
 Bridging the gap between gameplay code and raw hardware clipping requires establishing a unified, 
@@ -210,7 +214,7 @@ works with static meshes, skeletal meshes, and any other custom primitives that 
 from this base class.
 
 
-To support this feature, we only need to store three pieces of information:
+It is required to store three pieces of information to support this future :
 
 * A boolean flag indicating whether the component has an active per-object clip plane.
 
@@ -313,188 +317,164 @@ void UPrimitiveComponent::SetPerObjectClipPlane(const FVector& PlaneNormal, floa
   filename=""
 />
 
-### Game - Render Thread Synchronization
+## Scene Proxies and Game - Render Thread Synchronization
 
-In Unreal engine, the game logic runs on the Game Thread (GT), while rendering operations like updating vertex buffers and managing
-textures occurs on the Render Thread (RT). The engine creates mirror objects for the components in the game thread to represent them in render thread.
-Those objects are called proxies. Each proxy only contains the rendering releated information of the source component and doesn't have access to the component's logic.
+In Unreal Engine, gameplay logic executes on the Game Thread (GT), while rendering operations—such as updating vertex buffers and managing textures—occur on the Render Thread (RT).
+To safely handle this multi-threaded split, the engine creates mirrored representation objects on the RT for components living on the GT.
+These objects are known as Scene Proxies. Each proxy contains only the rendering-specific data required by the GPU and has no direct access to the source component's state or logic.
 
+However, simply creating these mirrored objects is not enough; the engine must also keep them synchronized with their source components.
+Because copying data for every proxy on every single frame would severely degrade frame rates, Unreal Engine
+utilizes an event-driven synchronization system based on three distinct mechanisms:
 
+1. Initialization on Creation: A scene proxy is instantiated for every rendering-related component when that component
+   is registered with the scene. During its construction, the proxy pulls all relevant data from the source component,
+   starting its lifecycle perfectly synchronized.
+2. In-Place Dynamic Updates: An existing scene proxy can be updated dynamically to reflect runtime changes made to its source component.
+   For example, modifying a component's Custom Primitive Data (CPD) floats triggers a targeted update that pushes only the modified values to the existing proxy.
+3. Recreation (Teardown and Rebuild): If an existing proxy cannot be modified in place to reflect a specific change, it is destroyed and completely recreated,
+   forcing full synchronization during construction. A prime example of this is toggling a light's shadow-casting property; 
+   because of cached lighting interactions with the scene, updating the active proxy dynamically is not supported. Instead, the engine tears down and rebuilds the proxy.
+   This recreation method is also the standard mechanism for applying structural changes made at edit time via the Details Panel, even if an in-place update pathway exists.
+   It is required to call <CodeInline>MarkRenderStateDirty</CodeInline> to tell the engine that current state of the proxy does no longer represents the contemporary rendering 
+   state of the source component, hence to recreate the existing proxy.
 
-
-
-
-
-
-
-
-
-
-Those proxies contains rendering releated information of the comp
- Those pro
-
-The engine uses proxies to synchronise data between the game and render threads.
-
-
-Proxies are the render thread mirrors of the components. The engine creates a proxy when a component is created in the world and 
-updates, or recreates it when something rendering releated changes in the component. 
-
-Therefore defining the properties in a component (which lives in the game thread) has nothing to do with the render thread.
-We need to synchronise the values across the two threads. 
-
-
-
-Defining the properties in the a component has nothing to do with the render thread directly. To let the render thread to use 
-the values of the properties we need to carry the information to the render thread. 
-
-
-
-we need to update the proxy object of the component when
-
-
-In Unreal Engine 4 (and UE5), the game logic runs on the Game Thread (GT), while rendering operations
-(like updating vertex buffers, managing textures, or preparing draw calls) occur on the Render Thread (RT).
-Because the GT and RT run asynchronously and in parallel, simply modifying a property on the GT
-does not automatically update the corresponding value on the RT. To pass data from the GT to the RT,
-we must explicitly synchronize it.
-
-
-
-
-
-Other than exposing the properties it is required to provide ways to modify them both in C++ and Blueprint. 
-The easiest thing that we can do is to provide a set of getters and setters for the properties.
-
-<Notification>
-Yes I wrote this system before Unreal Engine 6, while blueprint is a thing.
-</Notification>
+Before covering any of the mechanisms above it is required to define the mirror variables inside the <CodeInline>FPrimitiveSceneProxy</CodeInline>. 
+The main focus of all the synchronization process is going to be copying the actual properties from the source component to the mirror component.
 
 <CodeBlock
   code={`
-
-//PrimitiveComponent.h
-class UPrimitiveComponent : public USceneComponent ....
+//Header file
+struct FPrimitiveSceneProxy
 {
-    //...
-    /** Sets bPerObjectClipPlaneEnabled property and marks the render state dirty */
-    UFUNCTION(BlueprintCallable, Category = "Rendering")
-    ENGINE_API void SetPerObjectClipPlaneEnabled(bool bValue);
-
-    /**
-    * Sets PerObjectPlaneNormal and PerObjectPlaneDistance properties and
-    * marks the render state dirty.
-    */
-    UFUNCTION(BlueprintCallable, Category = "Rendering")
-    ENGINE_API void SetPerObjectClipPlane(const FVector& PlaneNormal, float PlaneDistance);
-
-    UFUNCTION(BlueprintCallable, Category = "Rendering")
-    ENGINE_API bool GetPerObjectClipPlaneEnabled() const
-    {
-      return bPerObjectClipPlaneEnabled;
-    }
-    
-    UFUNCTION(BlueprintCallable, Category = "Rendering")
-    ENGINE_API void GetPerObjectClipPlane(FVector& PlaneNormal, float& PlaneDistance) const
-    {
-      PlaneNormal = PerObjectClipPlaneNormal;
-      PlaneDistance = PerObjectClipPlaneDistance;
-    }
-    //...
+  //...
+  /** Enable per object clip plane on this object, it is not used if r.Allow.GlobalClipPlane is not enabled.*/
+  uint8 bPerObjectClipPlaneEnabled : 1;
+ 
+      	
+  /**
+  * Per object clip plane defined in global space
+  * (x,y,z) represents the plane normal in world space (normalized)
+  * w represents the distance of the plane from the world origin. It's negated.
+  */
+  FVector4 PerObjectClipPlane;
+ 
 }
 
-//PrimitiveComponent.cpp
-void UPrimitiveComponent::SetPerObjectClipPlaneEnabled(bool bValue)
-{
-    if (bPerObjectClipPlaneEnabled != bValue)
-    {
-        bPerObjectClipPlaneEnabled = bValue;
-
-        if (SceneProxy)
-        {
-            //To be implemented
-            SceneProxy->SetPerObjectClipPlaneEnabled_GameThread(bValue);
-        }
-    } 
-}
-
-void UPrimitiveComponent::SetPerObjectClipPlane(const FVector& PlaneNormal, float PlaneDistance)
-{
-    const bool bShouldUpdate = bPerObjectClipPlaneEnabled && ( !PlaneNormal.Equals(PerObjectClipPlaneNormal) || !FMath::IsNearlyEqual(PlaneDistance, PerObjectClipPlaneDistance));
-
-    PerObjectClipPlaneNormal = PlaneNormal;
-    PerObjectClipPlaneDistance = PlaneDistance;
-    
-    if (bShouldUpdate && SceneProxy)
-        //To be implemented
-        SceneProxy->SetPerObjectClipPlane_GameThread(FVector4(PerObjectClipPlaneNormal.GetSafeNormal(), -PerObjectClipPlaneDistance));
-}
 `}
   filename=""
 />
 
-As it is visible, the setters are straightforward. Their primary purpose is to notify the render-thread representation 
-of our primitive about the changes made on the game-thread. By invoking them we 
-are adressing the component-proxy alignment problem for runtime. The alignment is done by calling 
 
 
+### Initialization on Creation
 
-<Notification emoji="⚠️">
-<CodeInline>SetPerObjectClipPlane_GameThread</CodeInline> and <CodeInline>SetPerObjectClipPlaneEnabled_GameThread</CodeInline>
-functions are not implemented yet, but they are placed here for the sake of completeness. They are going to be 
-defined in a moment.
+The pattern the engine follows here is to derive an intermediatery description of the component and use that component to create a scene proxy. The main reason of this indirect approach is to
+provide the ability to store a description to create a scene proxy layer to the developer. 
+
+<Notification emoji="❔"> 
+To learn more see How Small Open Doors Can Lead to Better CPU Utilization and Bigger Games | Unreal Fest 2024 (https://www.youtube.com/watch?v=JaCf2Qmvy18)
 </Notification>
 
-
-Even though these setters do not exist their primary purpose is to notify the render-thread 
-representation of our primitive about the changes made on the game-thread. By invoking them we 
-are adressing the component-proxy alignment problem for runtime.
-
-
-<Notification emoji ="❓">
-A Scene Proxy (specifically FPrimitiveSceneProxy) is the render-thread representation 
-of a <CodeInline>UPrimitiveComponent</CodeInline>. Because Unreal Engine strictly separates simulation logic
-from rendering logic to maximize performance, the game thread (where components live)
-cannot safely access or modify rendering state directly. Instead, the render thread
-communicates with the game world through these proxies. They mirror the essential visual
-data of a component, providing a thread-safe snapshot that the renderer can query and
-process without blocking gameplay execution.
-</Notification>
+<p align="center">
+  <img src="/blog/implementing-per-object-clip-planes/Image_ProxyCreation.svg" alt="Plane"></img>
+</p>
 
 
+Think of <CodeInline>FPrimitiveSceneProxyDesc</CodeInline> as a photocopy of the component made on the game thread: lightweight, immutable for the handoff, and safe to read when the render thread builds proxies. 
+We are going to extend the description first so clip-plane data crosses the thread boundary in the same pattern Unreal already uses for bounds, flags, and material relevance. And than these informations
+are going to be copied into the proxy.
 
-### Keeping the Editor Happy: Overriding PostEditChangeProperty
+
+Happy news is that the process is basic, new variables are going to be created in the description and then the information is going to be stored in those variables, hence carrying the information to the 
+description is going to be done.
+
+<CodeBlock
+  code={`
+
+//Header file
+struct FPrimitiveSceneProxyDesc
+{
+    FPrimitiveSceneProxyDesc()
+    {
+      //...
+      bPerObjectClipPlaneEnabled = false;
+      PerObjectClipPlane = FVector4(0.0f, 0.0f, 0.0f, 0.0f);
+      //...
+    }
+
+    //...
+    uint32 bPerObjectClipPlaneEnabled : 1;
+    FVector4 PerObjectClipPlane; //Notice the plane is stored in compact form.
+    //...
+
+}
+//CPP file
+//Called by the engine to create a proxy description from a component.
+void FPrimitiveSceneProxyDesc::InitializeFromPrimitiveComponent(const UPrimitiveComponent* InComponent)
+{
+    //...
+
+    //Store all the releated information into the desciption.
+    bPerObjectClipPlaneEnabled = InComponent->GetPerObjectClipPlaneEnabled();
+
+    FVector InPerObjectClipPlane;
+    float InPerObjectClipPlaneDistance;
+
+    InComponent->GetPerObjectClipPlane(InPerObjectClipPlane, InPerObjectClipPlaneDistance);
+
+    PerObjectClipPlane = FVector4(InPerObjectClipPlane, -InPerObjectClipPlaneDistance);
+}
+
+`}
+  filename=""
+/>
+
+Once the description arrives on the render thread, <CodeInline>FPrimitiveSceneProxy</CodeInline> becomes the long-lived "shadow" of the component—still on the CPU, but owned by rendering. 
+The proxy constructor simply mirrors what we already packed into the desc; from here on, render-thread code reads clip-plane state from the proxy, not from the live component.
+
+All the information passed into the description are used to reconstruct the state of the source component within the render thread. The process is required to be changed in order to reconstruct 
+the source objects clippling state as well. The primitive scene proxy component constructor with the <CodeInline>FPrimitiveSceneProxy::FPrimitiveSceneProxy(const FPrimitiveSceneProxyDesc& InProxyDesc)</CodeInline>
+signature is used for that purpose. Our aim is going to be that constructor.
+
+The only thing to be done is simply copying the values from the description to the already defined mirror variables.
 
 <br></br>
- 
-Even though implementing setter function solves the runtime modification of the clip plane parameters the same is not true for the editor mode.
-It is required to listen the changes made in the details panel while in editor mode and reflect those changes to the scene proxies as well.
 
-<Notification emoji="U+1F4A1"> 
-In fact this pattern is going to repeat itself along the implementation. It is required to extend the engine to support both the changes made at run time and editor mode.
-Even though most of the code path does not diverge from one another there are some places where each cases requires different implementations in
-different stages. Both are going to be mentioned here.
-</Notification>
+<CodeBlock
+  code={`
+FPrimitiveSceneProxy::FPrimitiveSceneProxy(const FPrimitiveSceneProxyDesc& InProxyDesc)
+{
+    //...
+    bPerObjectClipPlaneEnabled = InProxyDesc.bPerObjectClipPlaneEnabled;
+	  PerObjectClipPlane = InProxyDesc.PerObjectClipPlane;
+}
 
-<br></br>
-The main nuance while notifying the proxy from the changes is that if one changes a property(rendering releated) of a primitive component at runtime the engine basically updates the already created scene proxy 
-(note that this is not always the case), but when it comes to the changes made in the editor the engine does not bother to update any proxies and rather recreate them.
+`}
+  filename=""
+/>
 
-<br></br>
-Therefore it is required to modify the engine code to do the followings :
+With all being done now the engine carries the per-object clip plane information all the way to the scene proxy when it is created. But that is not enough since it is only one of the three possible paths.
+We need to cover other two as well.
 
-1. Force the engine to recreate the scene proxy of the component when a per-object clip plane releated parameter gets changed via details panel.
-2. Altering the primitive scene proxy creation so that the newly created proxy reads from the newly created per object clip plane parameters while being created.
 
-<br></br>
+### Recreation (Teardown and Rebuild)
 
-The first part is relativally easy. When a property gets changed in editor mode via details panel the editor calls a function called <CodeInline>UPrimitiveComponent::PostEditChangeProperty</CodeInline>.
-By changing the code in this function it is possible to force the engine to recreate the scene proxy of the component. In fact, the engine engine code does the same thing as a reaction to change in 
-other renedering releated properties already. Inspect the following
+It is more convenient to cover teardown path since it is closely releated to synchronization through recreation of the proxy. This path generally taken by the engine when 
+it is not possible to update the state of the proxy to synchonize it with the source component. The reason can vary but the common part is that the engine cannot decide that by itself.
+It has to be notified about the situation. This is when <CodeInline>MarkRenderStateDirty</CodeInline> function becomes handy. 
+
+It is enough to call <CodeInline>MarkRenderStateDirty</CodeInline> when we want to force teardown. Since our implementation has no properties that can only be updated during creation therefore 
+we are only required to teadown existing scene proxyies when a per-object clip plane property gets changed through details panel. 
+
+
+<CodeInline>UPrimitiveComponent::PostEditChangeProperty(FPropertyChangedEvent& )</CodeInline> function gets called by the editor when a property gets changed via details panel
+while in the editor. It is possible to detect changes on per-object clip plane parameters in that function. In fact the editor does the same. Inspect the following
 
 <CodeBlock
   code={`
 #if WITH_EDITOR // Editor only functionality
-void UPrimitiveComponent::PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent)
+void UPrimitiveComponent::PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent) 
 {
     //...
     // we need to reregister the primitive if the min draw distance changed to propagate the change to the rendering thread
@@ -509,7 +489,9 @@ void UPrimitiveComponent::PostEditChangeProperty(FPropertyChangedEvent& Property
   filename="PrimitiveComponent.cpp"
 />
 
-All to do is adding an additional if statement checking whether any of per-object clip plane related properties are changed, before invalidating the current render state hence forcing
+In the example above the component listens those changes and tells the engine to reacreate the proxy if the changed property is <CodeInline>MinDrawDistance</CodeInline>.
+
+We are going to do the same by adding an if statement checking whether any of per-object clip plane related properties are changed, before invalidating the current render state hence forcing
 the engine to recreate the scene proxy.
 
 <CodeBlock
@@ -532,128 +514,211 @@ void UPrimitiveComponent::PostEditChangeProperty(...)
   filename="PrimitiveComponent.cpp"
 />
 
-## Step 2: The Cross-Thread Bridge (Component-to-Proxy Alignment)
+It is now ensured that whenever a primitive scene component gets created or one of our per-object clip plane parameters are changed in the editor time the engine creates or recreates the scene
+proxy of the component.  
 
-With the first step being done all it is require to change the scene proxy creation path so that is reads the information that is defined in the component
-and writes in itself as being created.
+### In-Place Dynamic Updates
 
-<p align="center">
-  <img src="/blog/implementing-per-object-clip-planes/Image_ProxyCreation.svg" alt="Plane"></img>
-</p>
+Even though recreation option always ensures the synchronization, it is generally not preferred to synchronise a primitive proxy with its source component during runtime. Creating 
+a scene proxy is a non-trivial operation and generally has some performance effects. For example when a light proxy gets created the engine calculates and caches its interaction with the game scene 
+which requires some degree of random memory access. 
 
-To learn more see _How Small Open Doors Can Lead to Better CPU Utilization and Bigger Games | Unreal Fest 2024_ (https://www.youtube.com/watch?v=JaCf2Qmvy18)
-<br></br>
-The engine generated descriptions from components and use them as an intermediatery version of the source component. Then those descriptions are used to generate the proxies. 
-Descriptions are produced in game thread and consumed by the render thread hence providing race condition safe environment.
-Because of counter measurements we must first carry the information to the description and then carry those informations into proxy from the description. 
+To evade from that cost the general pattern is to provide functions to update scene proxies in place. External code and the source component can use those functions to synchronize the component 
+and the proxy. 
+But there is a danger along the way, race conditions. 
 
-### The Safe-Pass: FPrimitiveSceneProxyDesc
+<Notification>
+A race condition occurs when two or more processes or threads access and modify 
+the same data at the same time, and the final result depends on the order in which 
+they run. Without proper coordination, this can lead to incorrect or unpredictable results.
+</Notification>
 
-Think of <CodeInline>FPrimitiveSceneProxyDesc</CodeInline> as a photocopy of the component made on the game thread: lightweight, immutable for the handoff, and safe to read when the render thread builds proxies. 
-We extend the description first so clip-plane data crosses the thread boundary in the same pattern Unreal already uses for bounds, flags, and material relevance.
+Since scene proxies lives in the render thread, any mutation from other threads must be managed carefully to prevent any race conditions.
+It is a widely used pattern to define different versions of the same function for each relevant thread, the do the same thing safely at the end with the thread information
+is given implicitly.That is what we are going to do here as well. We are going to define <CodeInline>SetPerObjectClipPlaneEnabled</CodeInline>
+and <CodeInline>SetPerObjectClipPlane</CodeInline> functions to set the <CodeInline>bPerObjectClipPlaneEnabled</CodeInline> and <CodeInline>PerObjectClipPlane</CodeInline>
+respectfully for the render and game thread. These functions are going to be named as
 
-<br></br>
+* <CodeInline>SetPerObjectClipPlaneEnabled_GameThread</CodeInline> : Sets the <CodeInline>bPerObjectClipPlaneEnabled</CodeInline> variable, to be called within the game thread.
+* <CodeInline>SetPerObjectClipPlaneEnabled_RenderThread</CodeInline> : Sets the <CodeInline>bPerObjectClipPlaneEnabled</CodeInline> variable, to be called within the render thread.
+* <CodeInline>SetPerObjectClipPlane_GameThread</CodeInline> : Sets the <CodeInline>PerObjectClipPlane</CodeInline> variable, to be called within the game thread.
+* <CodeInline>SetPerObjectClipPlane_RenderThread</CodeInline> : Sets the <CodeInline>PerObjectClipPlane</CodeInline> variable, to be called within the render thread.
 
-Happy news is that the process is basic, new variables are going to be created in the description and then the information is going to be stored in those variables, hence carrying the information to the 
-description is going to be done.
-
-<CodeBlock
-  code={`
-
-//Header file
-struct FPrimitiveSceneProxyDesc
-{
-    FPrimitiveSceneProxyDesc()
-    {
-      //...
-      bPerObjectClipPlaneEnabled = false;
-      PerObjectClipPlane = FVector4(0.0f, 0.0f, 0.0f, 0.0f);
-      //...
-    }
-
-    //...
-    uint32 bPerObjectClipPlaneEnabled : 1;
-    FVector4 PerObjectClipPlane;
-    //...
-
-}
-//CPP file
-void FPrimitiveSceneProxyDesc::InitializeFromPrimitiveComponent(const UPrimitiveComponent* InComponent)
-{
-    //...
-    bPerObjectClipPlaneEnabled = InComponent->GetPerObjectClipPlaneEnabled();
-
-    FVector InPerObjectClipPlane;
-    float InPerObjectClipPlaneDistance;
-
-    InComponent->GetPerObjectClipPlane(InPerObjectClipPlane, InPerObjectClipPlaneDistance);
-
-    PerObjectClipPlane = FVector4(InPerObjectClipPlane, -InPerObjectClipPlaneDistance);
-}
-
-`}
-  filename=""
-/>
-
-### The Shadow Object: FPrimitiveSceneProxy
-
-Once the description arrives on the render thread, <CodeInline>FPrimitiveSceneProxy</CodeInline> becomes the long-lived "shadow" of the component—still on the CPU, but owned by rendering. 
-The proxy constructor simply mirrors what we already packed into the desc; from here on, render-thread code reads clip-plane state from the proxy, not from the live component.
-
-<br></br>
+First let us define the render thread versions of the functions since they are simpler.
 
 <CodeBlock
   code={`
-
 //Header file
 struct FPrimitiveSceneProxy
 {
     //...
-    /** Enable per object clip plane on this object, it is not used if r.Allow.GlobalClipPlane is not enabled.*/
-    uint8 bPerObjectClipPlaneEnabled : 1;
-
-        	
-    /**
-    * Per object clip plane defined in global space
-    * (x,y,z) represents the plane normal in world space (normalized)
-    * w represents the distance of the plane from the world origin. It's negated.
+    /*
+    * Set per object clip plane enabled flag (RENDER THREAD)
+    *
+    * @param the new value
     */
-    FVector4 PerObjectClipPlane;
+    void SetPerObjectClipPlaneEnabled_RenderThread(bool bEnabled);
 
+    /**
+    * Set per object clip plane
+    * x,y, and z is used to define the normal vector of the plane
+    * in world space where the last value w is used to define the distance
+    * of the plane from the world origin (0, 0, 0)
+    *
+    * (RENDER THREAD)
+    * 
+    * @param ClipPlane 
+    */
+    void SetPerObjectClipPlane_RenderThread(const FVector4& ClipPlane);
 }
+
 //CPP file
-FPrimitiveSceneProxy::FPrimitiveSceneProxy(const FPrimitiveSceneProxyDesc& InProxyDesc)
+void FPrimitiveSceneProxy::SetPerObjectClipPlaneEnabled_RenderThread(bool bEnabled)
 {
-    //...
-    bPerObjectClipPlaneEnabled = InProxyDesc.bPerObjectClipPlaneEnabled;
-	  PerObjectClipPlane = InProxyDesc.PerObjectClipPlane;
+    //To ensure that this function is called within the render thread
+    check(IsInRenderingThread())
+
+    bPerObjectClipPlaneEnabled = bEnabled;
 }
 
+void FPrimitiveSceneProxy::SetPerObjectClipPlane_RenderThread(const FVector4& ClipPlane)
+{
+    //To ensure that this function is called within the render thread
+    check(IsInRenderingThread())
+
+    PerObjectClipPlane = ClipPlane;
+}
 `}
   filename=""
 />
 
-## Step 3: The GPU Scene Pipeline (Inducing the Builder)
+These functions basically checks whether the calling operation is made in the render thread first, and than mutates the variables. It is safe the change the value of the variables since
+these functions are designed to be called within the same thread as the scene proxy.
 
-With that being the all the implementation required to carry the information from the game thread to the proxies at the render thread is done.
+On the other hand game thread versions of the functions cannot perform a similar mutation. What we are going to do is to queue a render command which changes the value of the variables to be executed
+within the render thread. <CodeInline>ENQUEUE_RENDER_COMMAND</CodeInline> macro becomes handy here since it is designed to provide a way for developrs to enqueue render commands within threads other than
+render. These comamnds are then gets executed in the same order as they are queued at the start (not exactly, startish to be fair) of the render thread.
 
+Inspect the following definitions
+
+
+<CodeBlock
+  code={`
+//Header file
+struct FPrimitiveSceneProxy
+{
+  //...
+  /*
+  * Set per object clip plane enabled flag
+  *
+  * @param the new value
+  */
+  void SetPerObjectClipPlaneEnabled_GameThread(bool bEnabled);
+
+  /**
+  * Set per object clip plane
+  * x,y, and z is used to define the normal vector of the plane
+  * in world space where the last value w is used to define the distance
+  * of the plane from the world origin (0, 0, 0)
+  * 
+  * @param ClipPlane 
+  */
+  void SetPerObjectClipPlane_GameThread(const FVector4& ClipPlane);
+
+}
+
+//CPP file
+void FPrimitiveSceneProxy::SetPerObjectClipPlaneEnabled_GameThread(bool bEnabled)
+{
+  check(IsInGameThread())
+
+  ENQUEUE_RENDER_COMMAND(FSetPerObjectClipPlaneEnabled)(
+  [this, bEnabled](FRHICommandList& RHICmdList)
+  {
+    this->SetPerObjectClipPlaneEnabled_RenderThread(bEnabled);	
+  });
+}
+
+void FPrimitiveSceneProxy::SetPerObjectClipPlane_GameThread(const FVector4& ClipPlane)
+{
+  check(IsInGameThread())
+
+  ENQUEUE_RENDER_COMMAND(FSetPerObjectClipPlane)(
+  [this, ClipPlane](FRHICommandList& RHICmdList)
+  {
+    this->SetPerObjectClipPlane_RenderThread(ClipPlane);
+  });
+}
+`}
+  filename=""
+/>
+
+In these functions we do not directly mutate the variables but rather copy the new values into the lamda and then write them into the variables in the render thread. 
+It it now possible the change the per-object clip plane state of a primitive scene proxy after its creation. 
+
+Let's use them when the source component gets changed at the runtime.
+
+
+<CodeBlock
+  code={`
+//PrimitiveComponent.cpp
+void UPrimitiveComponent::SetPerObjectClipPlaneEnabled(bool bValue)
+{
+    if (bPerObjectClipPlaneEnabled != bValue)
+    {
+        bPerObjectClipPlaneEnabled = bValue;
+
+        if (SceneProxy) //<- Scene proxy of a component may not always be present, that is generally the case when the component is hidden. The source object is not being rendered afterall.
+        {
+            SceneProxy->SetPerObjectClipPlaneEnabled_GameThread(bValue);
+        }
+    } 
+}
+
+void UPrimitiveComponent::SetPerObjectClipPlane(const FVector& PlaneNormal, float PlaneDistance)
+{
+    const bool bShouldUpdate = bPerObjectClipPlaneEnabled && ( !PlaneNormal.Equals(PerObjectClipPlaneNormal) || !FMath::IsNearlyEqual(PlaneDistance, PerObjectClipPlaneDistance));
+
+    PerObjectClipPlaneNormal = PlaneNormal;
+    PerObjectClipPlaneDistance = PlaneDistance;
+    
+    if (bShouldUpdate && SceneProxy) //<- Since updating the proxy requires interthread communication it can be costly, we ensure that something worth notifiying happening before updating it.
+        SceneProxy->SetPerObjectClipPlane_GameThread(FVector4(PerObjectClipPlaneNormal.GetSafeNormal(), -PerObjectClipPlaneDistance));
+}
+`}
+  filename=""
+/>
+
+
+## Step 2: The GPU Scene Pipeline (Inducing the Builder)
+
+All the implementation required to carry the information from the game thread to the proxies at the render thread is done.
 The next step is to carry the information to the GPU before using those values in shaders to cull actual vertices.
+But, before diving into the implementation it is required to take one step back and understand how unreal's buffer information pipeline is implemented.
 
-But, to accomplish this stage a meta undestanding of unreal's buffer information pipeline should be undestood.
 Even though proxies are the shadows of the game objects on the render thread they are still reside in the CPU. GPU has no idea about those 
-objects. Unreal solves this issue by generating something called primitive uniform shader parameter. Unreal employs a collection of shader 
-parameters and call them <CodeInline>FPrimitiveUniformShaderParameters</CodeInline>. The parameter collection is basically a sequence of 
-float4 data which are treated as raw memory units. The information about the primitive is serialized into those parameters and send to the GPU based on
-an agreed packing configuration, such as 34th Fvector4f  represents the object location in camera space etc.
+objects. It is required to send informations to the GPU so that gpu can use them to render the object.  Unreal employs information packages for this purpose which
+is called primitive uniform shader parameters or more technically <CodeInline>FPrimitiveUniformShaderParameters</CodeInline>. 
+Any rendering releated information stored within the proxy is compactly stored into this structure and then gets serialized into <CodeInline>FVector4f</CodeInline>s just to be
+unpacked by the GPU.
 
-<br></br>
+Serializing and unpacking process of this data requires a carefull consideration since they represent a contract in between CPU and GPU. GPU has no way around other than trusting
+unpacking proccess to retreive the data sent by the GPU and since it is densly packed even one bit shift can cause a disaster. For instance, lets say 
+13th <CodeInline>FVector4f</CodeInline> contains the information about the word location of the component in its three elemnts. Then the GPU has to look at exacly that location 
+to unpact the word location, not 14th or not the last three elements.
 
-The general pipeline is very similar with the previous one. Inspect the following diagram.
+
+In overall the general pipeline is very similar with the previous one. Inspect the following diagram.
 
 <p align="center">
   <img src="/blog/implementing-per-object-clip-planes/Image_BuilderInformationFlow.svg" alt="Plane"></img>
 </p>
 
+Packing
+
+What we are going to do is basically store our information into the structure and change packing and unpacking functions to that
+
+# -----------------------------------------------
 Since creating a FPrimitiveUniformBufferParameters of an object, which is going to be referred as uniform buffer of an object, is not an efficent
 thing to do every frame the engine follows an event based system. It creates the uniform buffer when a primitive proxy is craeted or when a uniform buffer
 is marked as dirty , indicating a recent change in the proxy's state which concerns the GPU as well. 
