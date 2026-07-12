@@ -705,160 +705,31 @@ unpacked by the GPU.
 Serializing and unpacking process of this data requires a carefull consideration since they represent a contract in between CPU and GPU. GPU has no way around other than trusting
 unpacking proccess to retreive the data sent by the GPU and since it is densly packed even one bit shift can cause a disaster. For instance, lets say 
 13th <CodeInline>FVector4f</CodeInline> contains the information about the word location of the component in its three elemnts. Then the GPU has to look at exacly that location 
-to unpact the word location, not 14th or not the last three elements.
+to unpact the word location, not 14th <CodeInline>FVector4f</CodeInline> or not the last three elements of 13th <CodeInline>FVector4f</CodeInline>.
 
+Proxy object creates a special object called <CodeInline>FPrimitiveUniformShaderParametersBuilder</CodeInline>. This object is responsible converting 
+the information stored in the proxy to a <CodeInline>FPrimitiveUniformShaderParameters</CodeInline> instance. Then this instance is serialized
+into a stream of <CodeInline>FVector4f</CodeInline> before sending it to the GPU. 
 
-In overall the general pipeline is very similar with the previous one. Inspect the following diagram.
+In overall, the general pipeline is very similar with the previous one. Inspect the following diagram.
 
 <p align="center">
   <img src="/blog/implementing-per-object-clip-planes/Image_BuilderInformationFlow.svg" alt="Plane"></img>
 </p>
 
-Packing
+We are going to execute the following steps to send our information to the GPU:
+1. Create new variables in the <CodeInline>FPrimitiveUniformShaderParameters</CodeInline> so that we have a place to store per-object clip plane parameters into <CodeInline>FPrimitiveUniformShaderParameters</CodeInline>
+2. Update <CodeInline>FPrimitiveUniformShaderParametersBuilder</CodeInline> pa
+We are going to allocate variables in parameter struct first, so that we can store per-object clip plane parameters into those variables.
+Then 
 
-What we are going to do is basically store our information into the structure and change packing and unpacking functions to that
+
+What we are going to do is basically store our information into the structure and change packing and unpacking functions so that it carries the
+per-object clip plane information to the GPU.
+
+The engine assigns a <CodeInline>FPrimitiveUniformShaderParametersBuilder</CodeInline> to the proxy an
 
 # -----------------------------------------------
-Since creating a FPrimitiveUniformBufferParameters of an object, which is going to be referred as uniform buffer of an object, is not an efficent
-thing to do every frame the engine follows an event based system. It creates the uniform buffer when a primitive proxy is craeted or when a uniform buffer
-is marked as dirty , indicating a recent change in the proxy's state which concerns the GPU as well. 
-
-<br></br>
-
-The first one is handled by the engine but the second requires a little bit extra. Since per object clip plane parameters are newly introduced the engine
-does not know that it should regenerate the uniform buffers of the object when those variables are changed. 
-
-### Thread-Safe Communication via ENQUEUE_RENDER_COMMAND
-
-Therefore we need to tell the engine that when per-object clip plane parameters are changed it should regenerate the buffers.
-Luckly we are halfway there. Do you remember the functions that we call to notify the scene proxy about the changes made in the component,
-well it is time to revisit and define them.
-
-<br></br>
-
-Those functions were <CodeInline>SetPerObjectClipPlaneEnabled_GameThread(bool)</CodeInline> and <CodeInline>SetPerObjectClipPlane_GameThread(FVector4)</CodeInline>
-
-Notice, functions has _GameThread_ suffix. This is because these functions are designed to be called only in game thread. Their definitions
-are going to call their _RenderThread_ versions and then those functions are going to mutate the variables of the proxy. But additionally since 
-per-object clip plane releated variables are also changed with that call it is a good place to let the engine know that it should update the
-uniform buffers. 
-
-<CodeBlock
-  code={`
-
-//Header file
-struct FPrimitiveSceneProxy
-{
-    //...
-    /*
-    * Set per object clip plane enabled flag
-    *
-    * @param the new value
-    */
-    void SetPerObjectClipPlaneEnabled_GameThread(bool bEnabled);
-
-    /**
-    * Set per object clip plane
-    * x,y, and z is used to define the normal vector of the plane
-    * in world space where the last value w is used to define the distance
-    * of the plane from the world origin (0, 0, 0)
-    * 
-    * @param ClipPlane 
-    */
-    void SetPerObjectClipPlane_GameThread(const FVector4& ClipPlane);
-
-    /*
-    * Set per object clip plane enabled flag (RENDER THREAD)
-    *
-    * @param the new value
-    */
-    void SetPerObjectClipPlaneEnabled_RenderThread(bool bEnabled);
-
-    /**
-    * Set per object clip plane
-    * x,y, and z is used to define the normal vector of the plane
-    * in world space where the last value w is used to define the distance
-    * of the plane from the world origin (0, 0, 0)
-    *
-    * (RENDER THREAD)
-    * 
-    * @param ClipPlane 
-    */
-    void SetPerObjectClipPlane_RenderThread(const FVector4& ClipPlane);
-}
-
-//CPP file
-void FPrimitiveSceneProxy::SetPerObjectClipPlaneEnabled_GameThread(bool bEnabled)
-{
-    check(IsInGameThread())
-
-    ENQUEUE_RENDER_COMMAND(FSetPerObjectClipPlaneEnabled)(
-    [this, bEnabled](FRHICommandList& RHICmdList)
-    {
-      this->SetPerObjectClipPlaneEnabled_RenderThread(bEnabled);	
-    });
-}
-
-void FPrimitiveSceneProxy::SetPerObjectClipPlane_GameThread(const FVector4& ClipPlane)
-{
-    check(IsInGameThread())
-
-    ENQUEUE_RENDER_COMMAND(FSetPerObjectClipPlane)(
-    [this, ClipPlane](FRHICommandList& RHICmdList)
-    {
-      this->SetPerObjectClipPlane_RenderThread(ClipPlane);
-    });
-}
-
-void FPrimitiveSceneProxy::SetPerObjectClipPlaneEnabled_RenderThread(bool bEnabled)
-{
-    check(IsInRenderingThread())
-
-    if (bPerObjectClipPlaneEnabled != bEnabled)
-    {
-        bPerObjectClipPlaneEnabled = bEnabled;
-
-        if (PrimitiveSceneInfo)
-        {
-            Scene->RequestUniformBufferUpdate(*PrimitiveSceneInfo);
-            Scene->RequestGPUSceneUpdate(*PrimitiveSceneInfo, EPrimitiveDirtyState::ChangedOther);
-        }
-    }
-}
-
-void FPrimitiveSceneProxy::SetPerObjectClipPlane_RenderThread(const FVector4& ClipPlane)
-{
-    check(IsInRenderingThread())
-
-    const bool bShouldUpdate = bPerObjectClipPlaneEnabled && !ClipPlane.Equals(PerObjectClipPlane);
-    
-    PerObjectClipPlane = ClipPlane;
-
-    if (bShouldUpdate && PrimitiveSceneInfo)
-    {
-        Scene->RequestUniformBufferUpdate(*PrimitiveSceneInfo);
-        Scene->RequestGPUSceneUpdate(*PrimitiveSceneInfo, EPrimitiveDirtyState::ChangedOther);
-    }
-}
-`}
-  filename=""
-/>
-
-<CodeInline>ENQUEUE_RENDER_COMMAND</CodeInline> macro basically queues a lambda function to be called by the render thread. 
-It is one of the main comminication ways with the render thread. With that being used the new values of the properties can be copied into lambda
-and then get written to the actual variables in render thread, hence avoiding race conditions.
-
-Notice the additioanl function calls made by the render thread versions of the the mutator functions. These two functions are responsible for updateding
-the uniform buffer and sending the new buffer to the GPU. <CodeInline>RequirestUniformBufferUpdate</CodeInline> basically marks the uniform buffer
-genereted by the proxy as dirty so that the engine updates or recreates it as soon as possisble. On the other hand <CodeInline>RequestGPUSceneUpdate</CodeInline>
-tells the engine to resend the uniform buffer generated for the proxy to the GPU.
-
-<br></br>
-
-With those functionalities being implemented the engine updates the buffers and sends them to the GPU everytime a cahnge is detected releated to the per-object clip plane parameters.
-But still it does not include our parameters into the buffers. Therefore we need to update the buffer creation code as well.
-This part is a little bir confusing, not because it is complet but rather it requires to make changes at multiple places.
-
 ### Claiming Our Bitmask Flag in SceneDefinitions.h
 
 Let's tackle the flag first. Our first step is to record whether a primitive actually uses a per-object clip plane.
