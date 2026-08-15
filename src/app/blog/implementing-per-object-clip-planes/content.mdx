@@ -802,27 +802,38 @@ serialied into a stream of <CodeInline>FVector4f</CodeInline> s and the deserial
   <img src="/blog/implementing-per-object-clip-planes/Image_SerializationInformationFlow.svg" alt="Plane"></img>
 </p>
 
-The issue here is that GPU has to know the exact size of 
+The issue here is that GPU has to know the exact size of a FPrimitiveUniformShaderParameters instance in terms of <CodeInline>FVector4f</CodeInline> before trying to unpack one at the GPU side.
+Unreal uses a macro parameter for that purpose, <CodeInline> PRIMITIVE_SCENE_DATA_STRIDE </CodeInline>. The same paramater is read by GPU while unpacking the data.
+What we are going to do is to increment that value by one to reflect the memory allocated by our newly added <CodeInline>PerObjectClipPlane</CodeInline> parameter. 
+
 <CodeBlock
   code={`
 
-#define PRIMITIVE_SCENE_DATA_STRIDE 43 + 1 // increment it 1 
+// #define PRIMITIVE_SCENE_DATA_STRIDE 43 old value 
+#define PRIMITIVE_SCENE_DATA_STRIDE 44 // incremented by one 
 `}
   filename="SceneDefinitions.h"
 />
 
 
-This variable extends the 
 #### Per-Object Clip Plane Enabled Flag Parameter
 
-Adding a boolean flag parameter is a little bit tricky specially when it is compared to the clip plane parameter. This issue arises because how unreal sends boolean flags to the GPU. 
-A boolean variable occupies eight bits of memory even though it only requires one bit (true or false). 
+Adding a boolean flag parameter is a little bit tricky specially when it is compared to the clip plane parameter. 
+The difference arises due to boolean variables' rare property of only requiring one bit but occupying 8 bits on the memory instead. 
+This is because the minimum addressable memory unit in our computers is one byte (8 bits in most cases) not one bit. 
 
-Even though this is normally omitted when dealing with boolean on CPU side but when it comes to sending data in between CPU and GPU it becomes a topic worth consideration. 
-To increase throughput it is required to squize the data as much as possible, hence that unused seven bits becomes valuable. To solve that issue unreal 
-employs a 32 bit unsigned integer and uses each bit to store a different flag. 
+This is generally omitted while writing code since 7 bits are not that much memory. But when it comes to sending data to 
+in between peripherals every bit counts. Sending more data than needed can tank the performance. To mostly avoid this issue Unreal tightly packs every data
+as much as possible, booleans included. Instead of using a byte of memory to send a boolean flag unreal allocates an 32 bit floating point memory and uses each bit to
+store the information of a different boolean flag, hence uses one bit of memory to send a boolean variable. 
 
-You can see that flag in parameters list
+<Notification>
+Some developers heads may be in alarm thinking that what if we reqire to send boolean flags more than 32. Actually I am one of those developers. In 5.4 last 8 bits were left unused but 
+it is far less in 5.8. I guess we will find out very soon. 
+</Notification>
+
+You can see that 32 bit flag container parameter in FPrimitiveUniformShaderParameters sturcture.
+
 
 <CodeBlock
   code={`
@@ -842,15 +853,16 @@ BEGIN_GLOBAL_SHADER_PARAMETER_STRUCT(FPrimitiveUniformShaderParameters,ENGINE_AP
     SHADER_PARAMETER(float,			MaxWPOExtent)
     SHADER_PARAMETER(uint32,		CustomStencilValueAndMask)
     SHADER_PARAMETER(uint32,		VisibilityFlags)
-    SHADER_PARAMETER(FVector4f,     PerObjectClipPlane)  // here lies our new parameter 
+    SHADER_PARAMETER(FVector4f,     PerObjectClipPlane) 
 	  SHADER_PARAMETER_ARRAY(FVector4f, CustomPrimitiveData, [FCustomPrimitiveData::NumCustomPrimitiveDataFloat4s]) // Custom data per primitive that can be accessed through material expression parameters and modified through UStaticMeshComponent
 END_GLOBAL_SHADER_PARAMETER_STRUCT()
 `}
   filename="PrimitiveUniformShaderParameters.h"
 />
 
-We need to store our per-object clip plane enabled flag into that flags variable.
-It is required to find an unused bit and use that bit to store our flag. <CodeInline>SceneDefinitions.h</CodeInline> file contains the bit masks indicating which bit is being used to represent which flag.
+We are going to use an unused bit of that flags parameters to store the <CodeInline>bPerObjectClipPlaneEnabled</CodeInline> information. Luckly unreal has a list of masks 
+defining which bit of <CodeInline>Flags</CodeInline> parameter is used to for which flag. Those bit masks can be found in <CodeInline>SceneDefinitions.h</CodeInline> file.
+
 <CodeBlock
   code={`
 
@@ -906,102 +918,36 @@ It is required to find an unused bit and use that bit to store our flag. <CodeIn
   filename="SceneDefinitions.h"
 />
 
-Luckly there is one bit left unused (this may be different at your time) that we can use which is the most significant bit (MSB) of the variable. ()
+Actually the last bit of 32 bit <CodeInline>Flags</CodeInline> <CodeInline>0x80000000</CodeInline> is unused. We are going to use that bit to store our data.
 
-
-# -----------------------------------------------
-### Claiming Our Bitmask Flag in SceneDefinitions.h
-
-Let's tackle the flag first. Our first step is to record whether a primitive actually uses a per-object clip plane.
-We need to allocate some place to put our flag in. Luckly the FPrimitiveUniformShaderParameters structure already allocates one for us. 
-The parameter struct defines the set of parameters that which constitude the structure. The first parameter is <CodeInline>Flags</CodeInline>.
-This parameter is crucial for our implementation. The engine does not direclty send boolean parameters into the GPU since it is a waste of space to send 
-the data which can be contained in a bit inside of a whole boolean. Instead it alloces a memory enough to put a float (32 bits) and then use individual bits
-to carry flag information.
-
-<CodeBlock
-  code={`
-
-/** 
-* The uniform shader parameters associated with a primitive. 
-* Note: Must match FPrimitiveSceneData in shaders.
-* Note 2: Try to keep this 16 byte aligned. i.e |Matrix4x4|Vector3,float|Vector3,float|Vector4|  _NOT_  |Vector3,(waste padding)|Vector3,(waste padding)|Vector3. Or at least mark out padding if it can't be avoided.
-*/
-BEGIN_GLOBAL_SHADER_PARAMETER_STRUCT(FPrimitiveUniformShaderParameters,ENGINE_API)
-    SHADER_PARAMETER(uint32,		Flags) //<--- 32 bits for 32 distinct flags.
-    //...
-    SHADER_PARAMETER(float,			PixelProgrammableDistanceSquared)
-    SHADER_PARAMETER(float,			MaterialDisplacementFadeOutSize)
-    SHADER_PARAMETER(FUintVector2,	MeshPaintTextureDescriptor)
-    SHADER_PARAMETER(uint32,		NaniteRayTracingDataOffset)
-    SHADER_PARAMETER(float,			MaxWPOExtent)
-    SHADER_PARAMETER(uint32,		CustomStencilValueAndMask)
-    SHADER_PARAMETER(uint32,		VisibilityFlags)
-	  SHADER_PARAMETER_ARRAY(FVector4f, CustomPrimitiveData, [FCustomPrimitiveData::NumCustomPrimitiveDataFloat4s]) // Custom data per primitive that can be accessed through material expression parameters and modified through UStaticMeshComponent
-END_GLOBAL_SHADER_PARAMETER_STRUCT()
-`}
-  filename="PrimitiveUniformShaderParameters.h"
-/>
-
-The engine does not use all of the 32 flags, some are left unused (this can be different at your time). What we are going to do is to employ some of the unused bits for our bPerObjectClipPlaneEnabled
-flag just as the engine uses the other bits for other flags.
-
-The first thing to do is to decide which bit to use. This information is importantent since the GPU is going to search for the flag at the exact same location. 
-In scenedefinitions.h file there is a list of macros used to change a flag bit spesific to a flag.
-
-
-<CodeInline>SceneDefinitions.h</CodeInline> file contains the bit masks that are used to manipulate individual bits in that flag structure. What we are going to do is just finding an unemployed bit
-and use it for our own purposes. 
 
 <CodeBlock
   code={`
 
 // Primitive scene data flags
+/*---- ---- ---- ---- ---- ---- ----- xxxx */
 #define PRIMITIVE_SCENE_DATA_FLAG_CAST_SHADOWS								0x1
 #define PRIMITIVE_SCENE_DATA_FLAG_USE_SINGLE_SAMPLE_SHADOW_SL				0x2
 #define PRIMITIVE_SCENE_DATA_FLAG_USE_VOLUMETRIC_LM_SHADOW_SL				0x4
 #define PRIMITIVE_SCENE_DATA_FLAG_DECAL_RECEIVER							0x8
-
-#define PRIMITIVE_SCENE_DATA_FLAG_CACHE_SHADOW_AS_STATIC					0x10
-#define PRIMITIVE_SCENE_DATA_FLAG_OUTPUT_VELOCITY							0x20
-#define PRIMITIVE_SCENE_DATA_FLAG_DETERMINANT_SIGN							0x40
-#define PRIMITIVE_SCENE_DATA_FLAG_HAS_DISTANCE_FIELD_REPRESENTATION			0x80
-
-#define PRIMITIVE_SCENE_DATA_FLAG_HAS_CAPSULE_REPRESENTATION				0x100
-#define PRIMITIVE_SCENE_DATA_FLAG_HAS_CAST_CONTACT_SHADOW					0x200
-#define PRIMITIVE_SCENE_DATA_FLAG_HAS_PRIMITIVE_CUSTOM_DATA					0x400
-#define PRIMITIVE_SCENE_DATA_FLAG_LIGHTING_CHANNEL_0						0x800
-
-#define PRIMITIVE_SCENE_DATA_FLAG_LIGHTING_CHANNEL_1						0x1000
-#define PRIMITIVE_SCENE_DATA_FLAG_LIGHTING_CHANNEL_2						0x2000
-#define PRIMITIVE_SCENE_DATA_FLAG_HAS_INSTANCE_LOCAL_BOUNDS					0x4000
-#define PRIMITIVE_SCENE_DATA_FLAG_EVALUATE_WORLD_POSITION_OFFSET			0x8000
-
-#define PRIMITIVE_SCENE_DATA_FLAG_HAS_NANITE_IMPOSTER						0x10000
-#define PRIMITIVE_SCENE_DATA_FLAG_INSTANCE_DRAW_DISTANCE_CULL				0x20000
-#define PRIMITIVE_SCENE_DATA_FLAG_WPO_DISABLE_DISTANCE						0x40000
-#define PRIMITIVE_SCENE_DATA_FLAG_HAS_ALWAYS_EVALUATE_WPO_MATERIALS			0x80000
-
-#define PRIMITIVE_SCENE_DATA_FLAG_WRITES_CUSTOM_DEPTH_STENCIL				0x100000
-#define PRIMITIVE_SCENE_DATA_FLAG_DISABLE_MATERIAL_INVALIDATIONS			0x200000
-#define PRIMITIVE_SCENE_DATA_FLAG_HOLDOUT									0x400000
-#define PRIMITIVE_SCENE_DATA_FLAG_SPLINE_MESH								0x800000
-
-#define PRIMITIVE_SCENE_DATA_FLAG_SKINNED_MESH								0x1000000
-#define PRIMITIVE_SCENE_DATA_FLAG_INSTANCE_CULLING_OCCLUSION_QUERIES		0x2000000 // Whether per-instance occlusion queries are allowed when performing GPUScene instance culling
-#define PRIMITIVE_SCENE_DATA_FLAG_HAS_PIXEL_ANIMATION						0x4000000
-#define PRIMITIVE_SCENE_DATA_FLAG_RAYTRACING_FAR_FIELD						0x8000000
-
+.
+.
+.
+/*xxxx ---- ---- ---- ---- ---- ---- ---- */
 #define PRIMITIVE_SCENE_DATA_FLAG_RAYTRACING_HAS_GROUPID					0x10000000
 #define PRIMITIVE_SCENE_DATA_FLAG_PER_CLUSTER_DISPLACEMENT_FALLBACK_RASTER	0x20000000
 #define PRIMITIVE_SCENE_DATA_FLAG_IS_FIRST_PERSON_PRIMITIVE					0x40000000
-#define PRIMITIVE_SCENE_DATA_FLAG_PER_OBJECT_CLIP_PLANE_ENABLED         	0x80000000 //Our lovely flag is here as the last element.
+#define PRIMITIVE_SCENE_DATA_FLAG_IS_FIRST_PERSON_PRIMITIVE					0x40000000
+#define PRIMITIVE_SCENE_DATA_FLAG_PER_OBJECT_CLIP_PLANE_ENABLED         	0x80000000 // Here
 
 `}
   filename="SceneDefinitions.h"
 />
 
-Additionally we need to define a transient flag variable inside the builder so that the builder captures the flag value until it passes it to the paramters.
+We logically reserved the last bit of the <CodeInline>Flags</CodeInline> parameter for our per object clip plane enabled flag. It is time to actually store the information into that bit.
+The first thing to do is to store the information into the builder so that we can use that information to change the bits value later. Additionally it is required to 
+provide mutator function as we did for <CodeInline>PerObjectClipPlane</CodeInline> parameter for external codes.
+
 
 <CodeBlock
   code={`
@@ -1022,20 +968,6 @@ public:
     PRIMITIVE_UNIFORM_BUILDER_FLAG_METHOD(bool, PerObjectClipPlaneEnabled); // <-- These methods are defined to allow external manipulation, a basic setter.
     //...
 
-    
-	  inline const FPrimitiveUniformShaderParameters& Build()
-	  {
-        //...
-        Parameters.Flags |= bAllowInstanceCullingOcclusionQueries ? PRIMITIVE_SCENE_DATA_FLAG_INSTANCE_CULLING_OCCLUSION_QUERIES: 0u;
-        Parameters.Flags |= bHasPixelAnimation ? PRIMITIVE_SCENE_DATA_FLAG_HAS_PIXEL_ANIMATION : 0u;
-        Parameters.Flags |= bRayTracingFarField ? PRIMITIVE_SCENE_DATA_FLAG_RAYTRACING_FAR_FIELD : 0u;
-        Parameters.Flags |= bRayTracingHasGroupId ? PRIMITIVE_SCENE_DATA_FLAG_RAYTRACING_HAS_GROUPID : 0u;
-        Parameters.Flags |= bPerObjectClipPlaneEnabled ? PRIMITIVE_SCENE_DATA_FLAG_PER_OBJECT_CLIP_PLANE_ENABLED : 0u; //<- Our flag
-        Parameters.Flags |= bHasPerClusterDisplacementFallbackRaster ? PRIMITIVE_SCENE_DATA_FLAG_PER_CLUSTER_DISPLACEMENT_FALLBACK_RASTER : 0u;
-        Parameters.Flags |= bIsFirstPersonPrimitive ? PRIMITIVE_SCENE_DATA_FLAG_IS_FIRST_PERSON_PRIMITIVE : 0u;
-        //...
-    }
-
     //...
     uint32 bPerObjectClipPlaneEnabled : 1;
 } 
@@ -1043,159 +975,259 @@ public:
   filename="PrimitiveUniformShaderParameters.h"
 />
 
-<CodeBlock
-  code={`
-void FPrimitiveSceneProxy::BuildUniformShaderParameters(FPrimitiveUniformShaderParametersBuilder &Builder) const
-{
-    //...
-    // Update the uniform shader parameters.
-	  Builder = FPrimitiveUniformShaderParametersBuilder{}
-		    .Defaults()
-            .LocalToWorld(LocalToWorld) //<-- these are other setter functions defined by a similar macro
-            .PreviousLocalToWorld(PreviousLocalToWorld)
-            .ActorWorldPosition(ActorPosition)
-            .WorldBounds(Bounds)
-            .LocalBounds(LocalBounds)
-            //...
-            .PerObjectClipPlaneEnabled(bPerObjectClipPlaneEnabled);
-}
-`}
-  filename="PrimitiveSceneProxy.cpp"
-/>
+Our beloved scene proxy call the mutator function to store the information into the builder.eee 
 
-### Expanding FPrimitiveUniformShaderParameters
 
-The flag tells the GPU *whether* to clip; we still need a home for the plane itself. The next step is to extend the uniform parameter struct, bump the GPU-scene stride, and wire the builder so the compact <CodeInline>FVector4f</CodeInline> representation we derived earlier rides along with every primitive draw.
-
-<br></br>
-
-<CodeBlock
-  code={`
-
-/** 
-* The uniform shader parameters associated with a primitive. 
-* Note: Must match FPrimitiveSceneData in shaders.
-* Note 2: Try to keep this 16 byte aligned. i.e |Matrix4x4|Vector3,float|Vector3,float|Vector4|  _NOT_  |Vector3,(waste padding)|Vector3,(waste padding)|Vector3. Or at least mark out padding if it can't be avoided.
-*/
-BEGIN_GLOBAL_SHADER_PARAMETER_STRUCT(FPrimitiveUniformShaderParameters,ENGINE_API)
-    SHADER_PARAMETER(uint32,		Flags) //We're going to get to this in a moment.
-    //...
-    SHADER_PARAMETER(float,			PixelProgrammableDistanceSquared)
-    SHADER_PARAMETER(float,			MaterialDisplacementFadeOutSize)
-    SHADER_PARAMETER(FUintVector2,	MeshPaintTextureDescriptor)
-    SHADER_PARAMETER(uint32,		NaniteRayTracingDataOffset)
-    SHADER_PARAMETER(float,			MaxWPOExtent)
-    SHADER_PARAMETER(uint32,		CustomStencilValueAndMask)
-    SHADER_PARAMETER(uint32,		VisibilityFlags)
-    SHADER_PARAMETER(FVector4f,     PerObjectClipPlane)  
-	  SHADER_PARAMETER_ARRAY(FVector4f, CustomPrimitiveData, [FCustomPrimitiveData::NumCustomPrimitiveDataFloat4s]) // Custom data per primitive that can be accessed through material expression parameters and modified through UStaticMeshComponent
-END_GLOBAL_SHADER_PARAMETER_STRUCT()
-`}
-  filename="PrimitiveUniformShaderParameters.h"
-/>
-
-<CodeBlock
-  code={`
-
-#define PRIMITIVE_SCENE_DATA_STRIDE 43 + 1 // increment it 1 
-`}
-  filename="SceneDefinitions.h"
-/>
 
 <CodeBlock
   code={`
 
 struct FPrimitiveUniformShaderParametersBuilder
 {
-public:
-	inline FPrimitiveUniformShaderParametersBuilder& Defaults()
-	{
+  .
+  .
+  .
+  void FPrimitiveSceneProxy::BuildUniformShaderParameters(FPrimitiveUniformShaderParametersBuilder &Builder) const
+  {
       //...
-      Parameters.PerObjectClipPlane               = FVector4f(0, 0, 0, 0);
+      // Update the uniform shader parameters.
+      Builder = FPrimitiveUniformShaderParametersBuilder{}
+          .Defaults()
+              .LocalToWorld(LocalToWorld)
+              .PreviousLocalToWorld(PreviousLocalToWorld)
+              .ActorWorldPosition(ActorPosition)
+              .WorldBounds(Bounds)
+              .LocalBounds(LocalBounds)
+              //...
+              .PerObjectClipPlaneEnabled(bPerObjectClipPlaneEnabled); // we call the mutator function to modify the internal parameter of the builder.
   }
-
-#define PRIMITIVE_UNIFORM_BUILDER_METHOD(INPUT_TYPE, VARIABLE_NAME) \\
-	  inline FPrimitiveUniformShaderParametersBuilder& VARIABLE_NAME(INPUT_TYPE In##VARIABLE_NAME) { Parameters.VARIABLE_NAME = In##VARIABLE_NAME; return *this; }
-
-    //...
-    PRIMITIVE_UNIFORM_BUILDER_METHOD(FVector4f,			PerObjectClipPlane);
-    //...
-} 
-
-`}
-  filename="PrimitiveUniformShaderParametersBuilder.h"
-/>
-
-<CodeBlock
-  code={`
-void FPrimitiveSceneProxy::BuildUniformShaderParameters(FPrimitiveUniformShaderParametersBuilder &Builder) const
-{
-    //...
-    // Update the uniform shader parameters.
-	  Builder = FPrimitiveUniformShaderParametersBuilder{}
-		    .Defaults()
-            .LocalToWorld(LocalToWorld) //<-- these are other setter functions defined by a similar macro
-            .PreviousLocalToWorld(PreviousLocalToWorld)
-            .ActorWorldPosition(ActorPosition)
-            .WorldBounds(Bounds)
-            .LocalBounds(LocalBounds)
-            //...
-            .PerObjectClipPlaneEnabled(bPerObjectClipPlaneEnabled)
-            .PerObjectClipPlane(FVector4f(PerObjectClipPlane.X, PerObjectClipPlane.Y, PerObjectClipPlane.Z, PerObjectClipPlane.W));
+  .
+  .
+  .
 }
 `}
-  filename="PrimitiveSceneProxy.cpp"
+  filename="PrimitiveUniformShaderParameters.h"
 />
 
-### Packing the GPU Payload in Setup()
 
-CPU-side structs and builders are only half the contract—the GPU reads a flat float4 array laid out by <CodeInline>FPrimitiveSceneShaderData::Setup</CodeInline>. 
-We pin <CodeInline>PerObjectClipPlane</CodeInline> at index 34 and shift custom primitive data to start at 35, keeping the packing in sync with what <CodeInline>SceneData.ush</CodeInline> will expect on the shader side.
-
-<br></br>
+While building the actual parameters struct we are going to follow the general convention that unreal uses to modify other bit flags.
 
 <CodeBlock
   code={`
 
-void FPrimitiveSceneShaderData::Setup(const FPrimitiveUniformShaderParameters& PrimitiveUniformShaderParameters, FVector4f* RESTRICT OutData)
+struct FPrimitiveUniformShaderParametersBuilder
 {
-  
-    static_assert(NUM_LIGHTING_CHANNELS == 3, "The FPrimitiveSceneShaderData packing currently assumes a maximum of 3 lighting channels.");
-
-    // Note: layout must match GetPrimitiveData in usf
-
-    Store4(OutData, 0,
-        PrimitiveUniformShaderParameters.Flags,
-        PrimitiveUniformShaderParameters.InstanceSceneDataOffset,
-        PrimitiveUniformShaderParameters.NumInstanceSceneDataEntries,
-        (uint32)PrimitiveUniformShaderParameters.SingleCaptureIndex | ((PrimitiveUniformShaderParameters.VisibilityFlags & 0xFFFFu) << 16u));
-
-    Store4(OutData, 1,
-        PrimitiveUniformShaderParameters.PositionHigh.X,
-        PrimitiveUniformShaderParameters.PositionHigh.Y,
-        PrimitiveUniformShaderParameters.PositionHigh.Z,
-        PrimitiveUniformShaderParameters.PrimitiveComponentId);
-
-    //...
-
-    	
-    Store4(OutData, 34
-        , PrimitiveUniformShaderParameters.PerObjectClipPlane.X
-        , PrimitiveUniformShaderParameters.PerObjectClipPlane.Y
-        , PrimitiveUniformShaderParameters.PerObjectClipPlane.Z
-        , PrimitiveUniformShaderParameters.PerObjectClipPlane.W);
-
-    // Set all the custom primitive data float4. This matches the loop in SceneData.ush
-
-    const int32 CustomPrimitiveDataStartIndex = 35;
-    for (int32 DataIndex = 0; DataIndex < FCustomPrimitiveData::NumCustomPrimitiveDataFloat4s; ++DataIndex)
-    {
-      OutData[CustomPrimitiveDataStartIndex + DataIndex] = PrimitiveUniformShaderParameters.CustomPrimitiveData[DataIndex];
-    }
+  .
+  .
+  .
+  inline const FPrimitiveUniformShaderParameters& Build()
+      {
+          //...
+          Parameters.Flags |= bAllowInstanceCullingOcclusionQueries ? PRIMITIVE_SCENE_DATA_FLAG_INSTANCE_CULLING_OCCLUSION_QUERIES: 0u;
+          Parameters.Flags |= bHasPixelAnimation ? PRIMITIVE_SCENE_DATA_FLAG_HAS_PIXEL_ANIMATION : 0u;
+          Parameters.Flags |= bRayTracingFarField ? PRIMITIVE_SCENE_DATA_FLAG_RAYTRACING_FAR_FIELD : 0u;
+          Parameters.Flags |= bRayTracingHasGroupId ? PRIMITIVE_SCENE_DATA_FLAG_RAYTRACING_HAS_GROUPID : 0u;
+          Parameters.Flags |= bPerObjectClipPlaneEnabled ? PRIMITIVE_SCENE_DATA_FLAG_PER_OBJECT_CLIP_PLANE_ENABLED : 0u; //<- Our flag
+          Parameters.Flags |= bHasPerClusterDisplacementFallbackRaster ? PRIMITIVE_SCENE_DATA_FLAG_PER_CLUSTER_DISPLACEMENT_FALLBACK_RASTER : 0u;
+          Parameters.Flags |= bIsFirstPersonPrimitive ? PRIMITIVE_SCENE_DATA_FLAG_IS_FIRST_PERSON_PRIMITIVE : 0u;
+          //...
+      }
+  .
+  .
+  .
 }
 `}
-  filename="PrimitiveUniformShaderParameters.cpp"
+  filename="PrimitiveUniformShaderParameters.h"
 />
+
+
+## unpacking
+
+I'm sorry to tell you but I lied. The recent changes broke the renderer and it works incorrectly at the moment. With the current modifications
+made on <CodeInline>FPrimitiveUniformShaderParameters</CodeInline> we changed the structure of the information that is being send to the GPU and altered the packing behavior but 
+didn't changed the other side of the pipe, unpacking at the GPU. 
+ Currently we are sending the <CodeInline>bPerObjectClipPlaneEnabled</CodeInline> flag as the LSB of the <CodeInline>Flags</CodeInline>
+parameter and <CodeInline>PerObjectClipPlane</CodeInline> as the last <CodeInline>FVecto4f</CodeInline> or the last 32 bits of the <CodeInline>FPrimitiveUniformShaderParameters</CodeInline> structure.
+
+<p align="center">
+  <img src="/blog/implementing-per-object-clip-planes/Image_UnpackingCorruption.svg" alt="Plane"></img>
+</p>
+
+Forgetting to unpacking the <CodeInline>bPerObjectClipPlaneEnabled</CodeInline> does not cause a lot of issues since it does not affect or shift the packing layout. It was an unused
+bit and since we didn't unpack it at the GPU side it is technically speaking still unused. But the real problem is <CodeInline>PerObjectClipPlane</CodeInline> parameter here. Since we
+put our parameter right before custom primitive floats data (for sake of simplicity) it shifts it off by one <CodeInline>FVectorf</CodeInline> and since we didn't cover it by changing the
+unpacking code it corrupts the whole custom primitive floats data. The first float secretly maps to our per object clip plane information and the first custom primitive float data
+can only be accessed through the second one and so on. 
+It is required to be fixed to complete out implementation and most importantly left the engine working after the implementation.
+
+Lets start with the trivial one <CodeInline>bPerObjectClipPlaneEnabled</CodeInline>. On GPU all the packed data sent via <CodeInline>FPrimitiveUniformShaderParameters</CodeInline> 
+is unpacked to another struct called <CodeInline>FPrimitiveSceneData</CodeInline> which contains all the information about a primitive on the GPU side. I can be thought as the GPU representation
+of a primtive proxy which is the rendering thread representation of a primitive component. 
+The general convention that the engine follows to read the flags is to provide a set of getter functions which performs bit flag operations just like the ones we did to store the information
+into the <CodeInline>Flags</CodeInline> parameter in the first place. The reason that the engine does not unpack those bits to its individual boolean flags is , you guessed it, memory efficiency.
+
+So we are going to do the same. I highly encourage you to check the code written by the engine to learn about how the handle this situation.
+
+<CodeBlock
+  code={`
+
+/*
+* This function is going to return -1 or 1 based on whether the per-object clip plane is disabled or enabled respectively.
+* @param Flags Takes the flags parameter of a FPrimitiveSceneData instance
+*/
+float GetPrimitive_PerObjectClipPlaneEnabledSign(uint Flags)
+{
+  //Notice that the same bitmask macro is used here.
+  return CondMask(Flags & PRIMITIVE_SCENE_DATA_FLAG_PER_OBJECT_CLIP_PLANE_ENABLED, -1.f, 1.0f);
+}
+
+//An function that does the same thing but with using a primitive ID. Primitive ID's uniquely defines a primtive
+//It is acutally index of the primitive inside of the Data stream that we sent to the GPU.
+float GetPrimitive_PerObjectClipEnabledPlaneSign(uint PrimitiveID)
+{
+	return GetPrimitive_PerObjectClipPlaneEnabledSign_FromFlags(GetPrimitiveData(PrimitiveID).Flags);
+}
+
+`}
+  filename="SceneData.ush"
+/>
+
+That is it. From know on we can fully utilize <CodeInline>bPerObjectClipPlaneEnabled</CodeInline> parameter on the GPU side.
+
+It is time to do the same for the <CodeInline>PerObjectClipPlane</CodeInline>.
+Like we did while packing the data we need to alter the unpacking proccess. First of all it is required to allocate some place for our variable inside <CodeInline>FPrimitiveSceneData</CodeInline>
+data. We are going to place it the same location right before the <CodeInline>CustomPrimiveData</CodeInline>.
+
+<CodeBlock
+  code={`
+struct FPrimitiveSceneData
+{
+	uint		Flags;
+	uint		VisibilityFlags;
+	int			InstanceSceneDataOffset; // Link to the range of instances that belong to this primitive
+	int			NumInstanceSceneDataEntries;
+	int			PersistentPrimitiveIndex;
+	uint		SingleCaptureIndex; // TODO: Use 16 bits? 8 bits?
+	float3		PositionHigh;
+	uint		PrimitiveComponentId; // TODO: Refactor to use PersistentPrimitiveIndex, ENGINE USE ONLY - will be removed
+	FDFMatrix	LocalToWorld;
+	FDFInverseMatrix WorldToLocal;
+	FDFMatrix	PreviousLocalToWorld;
+	FDFInverseMatrix PreviousWorldToLocal;
+	float4x4	WorldToPreviousWorld; // NOTE: Intentionally not LWC
+	float3		InvNonUniformScale;
+	float		ObjectBoundsX;
+	FDFVector3	ObjectWorldPosition;
+	FDFVector3	ActorWorldPosition;
+	float		MinMaterialDisplacement;
+	float		MaxMaterialDisplacement;
+#if PRIMITIVE_HAS_TILEOFFSET_DATA
+	FLWCVector3	ObjectWorldPositionTO;
+	FLWCVector3	ActorWorldPositionTO;
+#endif
+	float		ObjectRadius;
+	uint		LightmapUVIndex;   // TODO: Use 16 bits? // TODO: Move into associated array that disappears if static lighting is disabled
+	float3		ObjectOrientation; // TODO: More efficient representation?
+	uint		LightmapDataIndex; // TODO: Use 16 bits? // TODO: Move into associated array that disappears if static lighting is disabled
+	float4		NonUniformScale;
+	float3		PreSkinnedLocalBoundsMin;
+	uint		NaniteResourceID;
+	float3		PreSkinnedLocalBoundsMax;
+	uint		NaniteHierarchyOffset;
+	float3		LocalObjectBoundsMin;
+	float		ObjectBoundsY;
+	float3		LocalObjectBoundsMax;
+	float		ObjectBoundsZ;
+	uint		InstancePayloadDataOffset;
+	uint		InstancePayloadDataStride;
+	uint		InstancePayloadExtensionSize;
+	float3		InstanceLocalBoundsCenter;
+	float3		InstanceLocalBoundsExtent;
+	float3		WireframeColor; // TODO: Should refactor out all editor data into a separate buffer
+	float3		PrimitiveColor; // TODO: Should refactor out all editor data into a separate buffer
+	uint		PackedNaniteFlags;
+	float2 		InstanceDrawDistanceMinMaxSquared;
+	float		InstanceWPODisableDistanceSquared;
+	uint		NaniteRayTracingDataOffset;
+	float		MaxWPOExtent;
+	uint		CustomStencilValueAndMask;
+	float		PixelProgrammableDistanceSquared;
+	float		MaterialDisplacementFadeOutSize;
+	uint2		MeshPaintTextureDescriptor;
+	float4		PerObjectClipPlane; // Our data
+	float4		CustomPrimitiveData[NUM_CUSTOM_PRIMITIVE_DATA]; // TODO: Move to associated array to shrink primitive data and pack cachelines more effectively
+};
+`}
+  filename="SceneData.ush"
+/>
+
+
+We put the data at the 34.th <CodeInline>FVector4f</CodeInline> on the CPU side and shift the <CodeInline>CustomPrimitiveData</CodeInline> data by one <CodeInline>FVector4f</CodeInline> to 
+get enough room for that adustment. We are going to follow the same logic here. 
+
+<CodeBlock
+  code={`
+
+// Fetch from scene primitive buffer
+FPrimitiveSceneData GetPrimitiveData(uint PrimitiveId)
+{
+#if SHADER_USES_PRIMITIVE_UBO
+	#if USE_INSTANCE_CULLING
+		return GetPrimitiveDataFromUniformBuffer();
+	#else
+		return LoadPrimitiveDataUBO(PrimitiveId);
+	#endif
+#elif (VERTEXSHADER && !PLATFORM_SUPPORTS_VERTEX_SHADER_SRVS)
+	// Vertex shaders may not have access to GPUScene on mobile. Use GetPrimitiveData(FVertexFactoryIntermediates Intermediates)
+	// TODO: need a way to report invalid usage, after all dead code elimination
+	return (FPrimitiveSceneData)0;
+#else
+	FPrimitiveSceneData PrimitiveData = (FPrimitiveSceneData)0;
+	// Note: layout must match FPrimitiveSceneShaderData in C++
+	// Relying on optimizer to remove unused loads
+	uint PrimitiveIndex = PrimitiveId * PRIMITIVE_SCENE_DATA_STRIDE;
+	
+	float3 PositionHigh = LoadPrimitivePrimitiveSceneDataElement(PrimitiveIndex, 1).xyz;
+
+	const float4x4 LocalToWorld = transpose(float4x4(
+		LoadPrimitivePrimitiveSceneDataElement(PrimitiveIndex, 2),
+		LoadPrimitivePrimitiveSceneDataElement(PrimitiveIndex, 3),
+		LoadPrimitivePrimitiveSceneDataElement(PrimitiveIndex, 4),
+		float4(0, 0, 0, 1)
+	));
+
+	const float4x4 PreviousLocalToWorld = transpose(float4x4(
+		LoadPrimitivePrimitiveSceneDataElement(PrimitiveIndex, 8),
+		LoadPrimitivePrimitiveSceneDataElement(PrimitiveIndex, 9),
+		LoadPrimitivePrimitiveSceneDataElement(PrimitiveIndex, 10),
+		float4(0, 0, 0, 1)
+	));
+
+	.
+  .
+  .
+	PrimitiveData.CustomStencilValueAndMask				= asuint(LoadPrimitivePrimitiveSceneDataElement(PrimitiveIndex, 32).y);
+	PrimitiveData.PixelProgrammableDistanceSquared		= LoadPrimitivePrimitiveSceneDataElement(PrimitiveIndex, 32).z;
+	PrimitiveData.MaterialDisplacementFadeOutSize		= LoadPrimitivePrimitiveSceneDataElement(PrimitiveIndex, 32).w;
+	PrimitiveData.MeshPaintTextureDescriptor			= asuint(LoadPrimitivePrimitiveSceneDataElement(PrimitiveIndex, 33).xy);
+
+	PrimitiveData.PerObjectClipPlane                    = LoadPrimitivePrimitiveSceneDataElement(PrimitiveIndex, 34).xyzw; // We read from 34.th float
+	// NOTE: Please make sure GetPrimitiveDataFromUniformBuffer() gets updated as well when adding new members here
+
+	// TODO: Move to associated array (and editor data) to shrink primitive data and better pack cachelines
+	UNROLL
+	for (uint DataIndex = 0; DataIndex < NUM_CUSTOM_PRIMITIVE_DATA; ++DataIndex)
+	{
+		// old code PrimitiveData.CustomPrimitiveData[DataIndex] = LoadPrimitivePrimitiveSceneDataElement(PrimitiveIndex,  34 + DataIndex); // we shifted it by one.
+		PrimitiveData.CustomPrimitiveData[DataIndex] = LoadPrimitivePrimitiveSceneDataElement(PrimitiveIndex,  35 + DataIndex);
+	}
+	return PrimitiveData;
+#endif
+}
+`}
+  filename="SceneData.ush"
+/>
+
 
 ## Step 4: The Finishing Touch—Shader Modifications (HLSL Stage)
 
