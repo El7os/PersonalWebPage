@@ -98,7 +98,7 @@ Where $\vec{N}$ is the surface normal vector of the plane and $\vec{P}_0$ is an 
 
 From this equation, it can be deduced that two <CodeInline>FVector3f</CodeInline>s are required to represent a 3D plane in world space. 
 However, it is possible to express a plane in a much more compact form. A 3D plane can be fully defined by a single <CodeInline>FVector4f</CodeInline> if 
-if we define $\vec{P}_0$ relative to the world origin using the signed distance $D_p$ as follows:
+we define $\vec{P}_0$ using the signed distance $D_p$ as follows:
 
 <MathBlock
   latex="\vec{P}_0 = D_p * \vec{N}"
@@ -106,7 +106,7 @@ if we define $\vec{P}_0$ relative to the world origin using the signed distance 
   size="large"
 />
 
-Geometrically, this approach defines $\vec{P}_0$ aGeometrically, this approach defines $\vec{N}$ intersects the plane surface.
+Geometrically, this approach defines $\vec{P_0}$ as the intersection point in between plane normal $\vec{N}$ and the plane surface.
 
 <p align="center">
   <img src="/blog/implementing-per-object-clip-planes/Image_Plane_WithWorldOrigin.svg" alt="PlaneWithWorldOrigin"></img>
@@ -118,7 +118,7 @@ and the scalar distance $D_p$ in the final $W$ component.
 
 This compact representation reduces the memory footprint of a plane by two floating-point
 values. Furthermore, expressing a plane in this 4D vector format unlocks highly efficient
-methods for performing plane-point distance tests, which we will explore next.
+methods for performing plane-point distance tests, which we are about to explore in a moment.
 
 ### - Evaluating Point-Plane Distance (The Magic Dot Product)
 
@@ -319,10 +319,13 @@ void UPrimitiveComponent::SetPerObjectClipPlane(const FVector& PlaneNormal, floa
 
 ## Scene Proxies and Game - Render Thread Synchronization
 
-In Unreal Engine, gameplay logic executes on the Game Thread (GT), while rendering operations—such as updating vertex buffers and managing textures—occur on the Render Thread (RT).
+In Unreal Engine, gameplay logic is executed on the Game Thread (GT), while rendering operations—such as updating vertex buffers and managing textures—occur on the Render Thread (RT).
 To safely handle this multi-threaded split, the engine creates mirrored representation objects on the RT for components living on the GT.
 These objects are known as Scene Proxies. Each proxy contains only the rendering-specific data required by the GPU and has no direct access to the source component's state or logic.
-
+<Notification>
+Actually the same pattern is used on game thread - physics context, but with physics proxies
+instead
+</Notification>
 However, simply creating these mirrored objects is not enough; the engine must also keep them synchronized with their source components.
 Because copying data for every proxy on every single frame would severely degrade frame rates, Unreal Engine
 utilizes an event-driven synchronization system based on three distinct mechanisms:
@@ -330,7 +333,7 @@ utilizes an event-driven synchronization system based on three distinct mechanis
 1. Initialization on Creation: A scene proxy is instantiated for every rendering-related component when that component
    is registered with the scene. During its construction, the proxy pulls all relevant data from the source component,
    starting its lifecycle perfectly synchronized.
-2. In-Place Dynamic Updates: An existing scene proxy can be updated dynamically to reflect runtime changes made to its source component.
+2. In-Place Dynamic Updates: An existing scene proxy can be updated dynamically to reflect runtime changes made on its source component.
    For example, modifying a component's Custom Primitive Data (CPD) floats triggers a targeted update that pushes only the modified values to the existing proxy.
 3. Recreation (Teardown and Rebuild): If an existing proxy cannot be modified in place to reflect a specific change, it is destroyed and completely recreated,
    forcing full synchronization during construction. A prime example of this is toggling a light's shadow-casting property; 
@@ -370,7 +373,7 @@ struct FPrimitiveSceneProxy
 ### Initialization on Creation
 
 The pattern the engine follows here is to derive an intermediatery description of the component and use that component to create a scene proxy. The main reason of this indirect approach is to
-provide the ability to store a description to create a scene proxy layer to the developer. 
+provide the ability to store a description to create a scene proxy later with or without the source component being presented at the time. 
 
 <Notification emoji="❔"> 
 To learn more see How Small Open Doors Can Lead to Better CPU Utilization and Bigger Games | Unreal Fest 2024 (https://www.youtube.com/watch?v=JaCf2Qmvy18)
