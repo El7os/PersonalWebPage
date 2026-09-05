@@ -1251,3 +1251,124 @@ Finally, the vertex shader must output the hardware clip distance when the per-o
 <br></br>
 
 *(Vertex shader clip-distance output—<CodeInline>PositionShader.usf</CodeInline> modifications to be documented in the next pass.)*
+
+# Updating The Shaders
+Everything up to this point served a single purpose: sending our per-object clip plane data to the GPU. Now, it's time to update the shaders to perform the actual vertex culling.
+
+We designed our per-object clip plane as an extension of Unreal's existing global clip plane. That architectural choice pays off here: instead of deriving a custom code path (though you are free to do so in your own implementation), we can simply inject our logic directly into any existing code path related to the global clip plane. It is a bit ad hoc, but it keeps things clean and straightforward.
+
+As mentioned earlier, GPU hardware supports multiple clip distances, but Unreal Engine only utilizes the first index of <CodeInline>SV_ClipDistance</CodeInline> to cull vertices via the global clip plane. To hook into this, we will locate every instance of <CodeInline>SV_ClipDistance</CodeInline> in the engine's shaders and inject our custom logic.
+
+The snippet below demonstrates how a vertex shader outputs its clip distance value to the semantic:
+<CodeBlock
+  code={`
+  void Pass (
+    ...
+#if USE_GLOBAL_CLIP_PLANE
+	  out float OutGlobalClipPlaneDistance : SV_ClipDistance // This means that the value of the variable OutGlobalClipPlaneDistance is written into SV_ClipDistance at the end of the function
+#endif
+    ...
+  )
+  {
+    ...
+  }
+`}
+  filename="PrimitiveComponent.h"
+/>
+
+In Unreal Engine 5.8, the following shaders utilize the global clip plane by writing distance values directly to <CodeInline>SV_ClipDistance</CodeInline>:
+
+* <CodeInline>AnisotropyPassShader.usf</CodeInline>
+* <CodeInline>BasePassVertexShader.usf</CodeInline>
+* <CodeInline>DebugViewModeVertexShader.usf</CodeInline>
+* <CodeInline>DepthOnlyVertexShader.usf</CodeInline>
+* <CodeInline>DistortAccumulateVS.usf</CodeInline>
+* <CodeInline>HitProxyVertexShader.usf</CodeInline>
+* <CodeInline>LightMapDensityShader.usf</CodeInline>
+* <CodeInline>MeshDecals.usf</CodeInline>
+* <CodeInline>MobilePassCommon.usf</CodeInline>
+* <CodeInline>NaniteRasterizer.usf</CodeInline>
+* <CodeInline>PositionOnlyDepthVertexShader.usf</CodeInline>
+* <CodeInline>ShadowDepthVertexShader.usf</CodeInline>
+* <CodeInline>VelocityShader.usf</CodeInline>
+
+We are going to use the next empty clip distance value for our implementation <CodeInline>SV_Distance1</CodeInline>. Let us start with extending those functions so that they also 
+write to our <CodeInline>SV_ClipDistance1</CodeInline> parameter like the following in all the shaders above.
+
+
+<CodeBlock
+  code={`
+  void Pass (
+    ...
+#if USE_GLOBAL_CLIP_PLANE
+	  out float OutGlobalClipPlaneDistance : SV_ClipDistance 
+	  out float OutPerObjectClipPlaneDistance : SV_ClipDistance1
+#endif
+    ...
+  )
+  {
+    ...
+  }
+`}
+  filename="PrimitiveComponent.h"
+/>
+
+
+Before injecting our custom calculation to those function bodies let us inspect how unreal handles global clip plane. The following code snipped is from <CodeInline>AnisotropyPassShader.usf</CodeInline>
+shader, the logic is almost the same with the other shaders.
+
+
+<CodeBlock
+  code={`
+  { //Function body
+    ...
+#if USE_GLOBAL_CLIP_PLANE
+		OutGlobalClipPlaneDistance = dot(ResolvedView.GlobalClippingPlane, float4(WorldPos.xyz, 1));
+#endif
+  }
+`}
+  filename="PrimitiveComponent.h"
+/>
+
+Engine calculates the clip plane distance as it is explained in this blog page, the dot product of the plane in it special form and the augmented query point. 
+After we complete out implementation this code snippet is going to look like this.
+
+<CodeBlock
+  code={`
+  { //Function body
+    ...
+#if USE_GLOBAL_CLIP_PLANE
+		OutGlobalClipPlaneDistance = dot(ResolvedView.GlobalClippingPlane, float4(WorldPos.xyz, 1));
+
+    const bool bPerObjectClipPlaneEnabled; //Let's assume that this variable contains the information whether the per-object clip plane is enabled for the object.
+    const float4 ClipPlane; //Let's assume that this variable contains the per-object clip plane information of the object.
+    const float3 VertexPos; //Let's assume that this variable contains the vertex position information (in world space).
+
+    OutPerObjectClipPlaneDistance = bPerObjectClipPlaneEnabledForTheObject ? dot(ObjectClipPlane, float4(VertexPos, 1)) : 0.0f; 
+#endif
+  }
+`}
+  filename="PrimitiveComponent.h"
+/>
+
+From the kinda implementation above a question arises, how we can get the information contained by these three variables <CodeInline>bPerObjectClipPlaneEnabled</CodeInline>, <CodeInline>ClipPlane</CodeInline>, and <CodeInline>VertexPos</CodeInline>
+inside a shader function. Let us start with the easiest one <CodeInline>VertexPos</CodeInline>. 
+
+You might think that it is the same as <CodeInline>WorldPos</CodeInline> variable used in global clip plane calculation. Even though it is partially correct it is not the right answer.
+<CodeInline>WorldPos</CodeInline> variable contains the position of the vertex relative to the camera position in the world. Actually it makes sence since global clip plane is actually 
+computed relatively to the camera position. When global clip plane is far way 1000 units it doesn't indicate a world position it indicates the object whose distance from the camera is greater than
+1000 untits are clipped. We need to convert it into actual world space position of the vertex before using it in our calculation, lets call it *absolute world position*.
+
+Calculating is trivial, it is only required to add the camera world position to the <CodeInline>WorldPosition</CodeInline>.
+
+<CodeBlock
+  code={`
+  { //Function body
+    ...
+    //DFHackToFloat is required to convert the higt precision position value to a vanilla, pitty, loser float.
+    const float3 AbsoluteWorldPos = float3 AbsoluteWorldPos = WorldPos + DFHackToFloat(ResolvedView.WorldCameraOrigin);
+    ...
+  }
+`}
+  filename="PrimitiveComponent.h"
+/>
