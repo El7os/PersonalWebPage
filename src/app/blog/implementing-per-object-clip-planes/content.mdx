@@ -1255,11 +1255,19 @@ Finally, the vertex shader must output the hardware clip distance when the per-o
 # Updating The Shaders
 Everything up to this point served a single purpose: sending our per-object clip plane data to the GPU. Now, it's time to update the shaders to perform the actual vertex culling.
 
-We designed our per-object clip plane as an extension of Unreal's existing global clip plane. That architectural choice pays off here: instead of deriving a custom code path (though you are free to do so in your own implementation), we can simply inject our logic directly into any existing code path related to the global clip plane. It is a bit ad hoc, but it keeps things clean and straightforward.
+We designed our per-object clip plane as an extension of Unreal's existing global clip plane. That architectural choice pays off here: instead of deriving a custom code path
+(though you are free to do so in your own implementation), we can simply inject our logic directly into any existing code path related to the global clip plane. 
 
-As mentioned earlier, GPU hardware supports multiple clip distances, but Unreal Engine only utilizes the first index of <CodeInline>SV_ClipDistance</CodeInline> to cull vertices via the global clip plane. To hook into this, we will locate every instance of <CodeInline>SV_ClipDistance</CodeInline> in the engine's shaders and inject our custom logic.
+But before it is required so have a short information about how clip distances and other system variables are handled by the engine.
 
-The snippet below demonstrates how a vertex shader outputs its clip distance value to the semantic:
+System variables are special variables defined by graphics APIs that can alter different aspects of the execution. Each graphics API defines a different set of system varialbes which makes it
+API dependent. To solve the dependency Unreal Engine Puts an abstraction layer on top of that by defining its own variables that maps to those system variables. To indicate that spesific variables
+Unreal puts <CodeInline>SV_</CodeInline> prefix to their names.
+
+As you may already guessed clip distances are one of those variables and different graphics APIs defines a different number of clip distance variables. Luckly every API defines enough number of clip distances
+for our implementation. Unreal utilizes the first clip distance variable <CodeInline>SV_ClipDistance</CodeInline> for global clip planes. <CodeInline>SV_ClipDistance</CodeInline> value is modified by several 
+vertex shaders, but the code below displays the common pattern shared by all the shaders.
+
 <CodeBlock
   code={`
   void Pass (
@@ -1270,13 +1278,13 @@ The snippet below demonstrates how a vertex shader outputs its clip distance val
     ...
   )
   {
-    ...
+    ... //Modification happens here.
   }
 `}
-  filename="PrimitiveComponent.h"
+  filename=""
 />
 
-In Unreal Engine 5.8, the following shaders utilize the global clip plane by writing distance values directly to <CodeInline>SV_ClipDistance</CodeInline>:
+As said before several shaders manipulates <CodeInline>SV_ClipDistance</CodeInline> variable. As of Unreal Engine 5.8 these are the shader files which contains a vertex shader which manipulates (writes) it.
 
 * <CodeInline>AnisotropyPassShader.usf</CodeInline>
 * <CodeInline>BasePassVertexShader.usf</CodeInline>
@@ -1292,9 +1300,7 @@ In Unreal Engine 5.8, the following shaders utilize the global clip plane by wri
 * <CodeInline>ShadowDepthVertexShader.usf</CodeInline>
 * <CodeInline>VelocityShader.usf</CodeInline>
 
-We are going to use the next empty clip distance value for our implementation <CodeInline>SV_Distance1</CodeInline>. Let us start with extending those functions so that they also 
-write to our <CodeInline>SV_ClipDistance1</CodeInline> parameter like the following in all the shaders above.
-
+We are going to allocate the next available clip distance variable <CodeInline>SV_ClipDistance1</CodeInline> and use it to extent the functionality defined in those shader files above, like the following.
 
 <CodeBlock
   code={`
@@ -1310,17 +1316,25 @@ write to our <CodeInline>SV_ClipDistance1</CodeInline> parameter like the follow
     ...
   }
 `}
-  filename="PrimitiveComponent.h"
+  filename=""
 />
 
-
-Before injecting our custom calculation to those function bodies let us inspect how unreal handles global clip plane. The following code snipped is from <CodeInline>AnisotropyPassShader.usf</CodeInline>
+Before injecting our custom calculation to those shaders let us inspect how unreal handles global clip plane. The following code snipped is from <CodeInline>AnisotropyPassShader.usf</CodeInline>
 shader, the logic is almost the same with the other shaders.
-
 
 <CodeBlock
   code={`
-  { //Function body
+  void MainVertexShader(
+	    FVertexFactoryInput Input,
+	    out FVertexOutput Output 
+#if USE_GLOBAL_CLIP_PLANE
+	    , out float OutGlobalClipPlaneDistance : SV_ClipDistance
+#endif
+#if INSTANCED_STEREO
+	    , out uint ViewportIndex : SV_ViewPortArrayIndex
+#endif
+	)
+  {
     ...
 #if USE_GLOBAL_CLIP_PLANE
 		OutGlobalClipPlaneDistance = dot(ResolvedView.GlobalClippingPlane, float4(WorldPos.xyz, 1));
@@ -1331,44 +1345,64 @@ shader, the logic is almost the same with the other shaders.
 />
 
 Engine calculates the clip plane distance as it is explained in this blog page, the dot product of the plane in it special form and the augmented query point. 
-After we complete out implementation this code snippet is going to look like this.
+We are going to execute a similar calculation, inspect the below.
 
 <CodeBlock
   code={`
+  void MainVertexShader(
+	    FVertexFactoryInput Input,
+	    out FVertexOutput Output 
+#if USE_GLOBAL_CLIP_PLANE
+	    , out float OutGlobalClipPlaneDistance : SV_ClipDistance
+#endif
+#if INSTANCED_STEREO
+	    , out uint ViewportIndex : SV_ViewPortArrayIndex
+#endif
+	)
   { //Function body
     ...
 #if USE_GLOBAL_CLIP_PLANE
-		OutGlobalClipPlaneDistance = dot(ResolvedView.GlobalClippingPlane, float4(WorldPos.xyz, 1));
 
-    const bool bPerObjectClipPlaneEnabled; //Let's assume that this variable contains the information whether the per-object clip plane is enabled for the object.
-    const float4 ClipPlane; //Let's assume that this variable contains the per-object clip plane information of the object.
-    const float3 VertexPos; //Let's assume that this variable contains the vertex position information (in world space).
+    OutGlobalClipPlaneDistance = dot(ResolvedView.GlobalClippingPlane, float4(WorldPos.xyz, 1));
 
+    //0.0f means that the vertex is on the plane and should be rendered
     OutPerObjectClipPlaneDistance = bPerObjectClipPlaneEnabledForTheObject ? dot(ObjectClipPlane, float4(VertexPos, 1)) : 0.0f; 
 #endif
   }
 `}
-  filename="PrimitiveComponent.h"
+  filename=""
 />
 
-From the kinda implementation above a question arises, how we can get the information contained by these three variables <CodeInline>bPerObjectClipPlaneEnabled</CodeInline>, <CodeInline>ClipPlane</CodeInline>, and <CodeInline>VertexPos</CodeInline>
-inside a shader function. Let us start with the easiest one <CodeInline>VertexPos</CodeInline>. 
+Implementation is simple and easy to understand, if per-object clip plane is enabled on the object manipulate out clip distance value as the distance from the per-object clip plane, zero otherwise which indicating no clipping.
+The only thing the holds us back from actually extending every shader that manipulates <CodeInline>SV_ClipDistance</CodeInline> and update their function body like above 
+is the absense of the information coveyed by these three variables <CodeInline>bPerObjectClipPlaneEnabled</CodeInline>, <CodeInline>ClipPlane</CodeInline>, and <CodeInline>VertexPos</CodeInline>.
 
-You might think that it is the same as <CodeInline>WorldPos</CodeInline> variable used in global clip plane calculation. Even though it is partially correct it is not the right answer.
-<CodeInline>WorldPos</CodeInline> variable contains the position of the vertex relative to the camera position in the world. Actually it makes sence since global clip plane is actually 
-computed relatively to the camera position. When global clip plane is far way 1000 units it doesn't indicate a world position it indicates the object whose distance from the camera is greater than
-1000 untits are clipped. We need to convert it into actual world space position of the vertex before using it in our calculation, lets call it *absolute world position*.
+<CodeInline>VertexPos</CodeInline> is a good starting point since it is the easiest one any requires so little effort. Let us tackle that first before getting to the real challange. 
+Initially one might think to use the <CodeInline>WorldPos</CodeInline> as the <CodeInline>VertexPos</CodeInline> as it is being used in global clip plane calculation.
+Even though it is partially correct it is not the right answer. <CodeInline>WorldPos</CodeInline> variable contains the position of the vertex relative to the camera position in the world.
+It makes sense since global clip plane is actually computed relatively to the camera position. When global clip plane is far way 1000 units it doesn't indicate a world position it
+indicates the object whose distance from the camera is greater than 1000 untits are clipped. 
+We need to convert it into actual world space position of the vertex before using it in our calculation.
 
-Calculating is trivial, it is only required to add the camera world position to the <CodeInline>WorldPosition</CodeInline>.
+Calculation is trivial, it is only required to add the camera world position to the <CodeInline>WorldPosition</CodeInline>.
 
 <CodeBlock
   code={`
   { //Function body
     ...
     //DFHackToFloat is required to convert the higt precision position value to a vanilla, pitty, loser float.
-    const float3 AbsoluteWorldPos = float3 AbsoluteWorldPos = WorldPos + DFHackToFloat(ResolvedView.WorldCameraOrigin);
+    const float3 VertexPos = WorldPos + DFHackToFloat(ResolvedView.WorldCameraOrigin);
     ...
   }
 `}
   filename="PrimitiveComponent.h"
 />
+
+Upon completion of this phase, we can get to the other two variables <CodeInline>bPerObjectClipPlaneEnabled</CodeInline>, <CodeInline>ClipPlane</CodeInline>. 
+The issue that makes accessing those informations a little bit harder is those information's being a property of the object rather than the vertex itself. Position is a property of the the vertex itself
+but <CodeInline>bPerObjectClipPlaneEnabled</CodeInline> and <CodeInline>ClipPlane</CodeInline> properties belongs to the object which owns the vertex itself. Therefore we need to access the 
+data that we sent to the GPU to read those informations. If we continue with 
+We are lucky that no camera orientation is involved since this is a basic distance calculation. With that being 
+
+**Accessing** <CodeInline>bPerObjectClipPlaneEnabled</CodeInline> :
+
