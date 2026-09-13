@@ -1,32 +1,30 @@
-## - Introduction
+## Introduction
 In modern real-time rendering, specialized visual effects, gameplay mechanics, and visualization tools often require geometry to be dynamically clipped.
 While Unreal Engine 5 provides robust support for global clip planes—typically utilized for planar water reflections—it 
 lacks out-of-the-box support for isolating this behavior on a per-object basis.
-
 
 When global clip planes are enabled, Unreal Engine uses one of the hardware's clip-distance slots to discard vertices before rasterization.
 The plane's position and orientation are defined per camera, which is ideal for reflections; however, this applies uniformly 
 to every object that the camera draws. While different cameras can carry different global planes, every primitive within a single 
 view shares the same cutting boundary. This global scope is the exact bottleneck our implementation addresses.
 
+The Per-Object Clip Plane implementation described here is positioned as an extension to existing global clip plane other than a discrete implementation.
+While the framework presented in this document serves as an extention, it is possible to construct a fully standalone implementation as well.
 
-Multiple clip distances can be active simultaneously, and modern graphics APIs typically expose six to eight slots.
-Our implementation occupies a different slot than the engine's global clip plane so that both can coexist: water reflections 
+Modern graphics APIs typically expose six to eight hardware clip-distance slots simultaneously. Unreal Engine utilizes the first clip distance value to 
+clip vertices using global clip plane. This implementation occupies a different slot than the engine's global clip plane so that both can coexist: water reflections 
 retain their camera-driven plane, while individual objects can carry their own.
 
 Implementing per-object clip planes allows developers to slice, hollow out, or selectively cull geometry on specific primitives without 
 affecting adjacent elements in the scene. This capability is crucial for applications ranging from architectural visualizations and medical 
 imaging to sci-fi cross-section effects.
 
-
 The goal is to extend Unreal Engine's existing global clip-plane architecture by defining the plane used to derive clip distances 
 on a per-object basis, enabling each primitive to expose its own independent cutting boundary. This utilizes the same underlying 
 hardware feature and identical dot-product mathematics, but introduces a separate control lane that artists and gameplay systems 
 can drive independently.
 
-
-To understand how to inject this custom logic into the rendering pipeline, we must first look at how the hardware handles 
-clipping boundaries under the hood.
+Before diving into the engine souce code to integrate this extension, a close examination of how graphics hardwares nativelly processes clipping boundaries under the hood is required. 
 
 <br></br>
 
@@ -36,18 +34,16 @@ clipping boundaries under the hood.
 />
 
 
-## - What Are Clip Planes And Where to Find Them
+## Clip Planes and Where to Find Them
 
-In computer graphics, the hardware relies on a dedicated set of distances to determine whether a vertex should be clipped.
+In computer graphics, rendering hardware relies on a dedicated set of distances to determine whether a vertex should be preserved or clipped.
 Rather than executing software-side culling algorithms, modern graphics APIs (such as DirectX, Vulkan, and OpenGL) natively 
-utilize specialized hardware registers allocated for these clip distances—typically supporting a minimum of six to eight simultaneously.
+expose specialized hardware registers allocated for these clip distances, typically supporting a minimum of six to eight simultaneously.
 
-
-During the vertex processing stage of the rendering pipeline, the hardware evaluates these calculated distance values.
+During the vertex processing stage of the rendering pipeline, the hardware evaluates these distance values.
 If a vertex yields a negative clip distance, the hardware rasterizer clips the primitive along this boundary, cleanly discarding non-visible
 fragments before they ever reach the pixel shader. Essentially, the hardware monitors each active clip distance slot and discards the vertex
 if even a single distance value falls below zero.
-
 
 Generally, developers use a plane equation to derive this clip distance value. An arbitrary plane is defined, and the clip distance
 is calculated as the signed distance from the vertex to that plane. If the vertex lies in the positive half-space—the side the plane
@@ -60,25 +56,21 @@ value becomes negative, triggering the hardware to clip the vertex.
   size="large"
 />
 
-
 Because using a plane equation to derive these values is the industry-standard approach, this hardware feature is universally referred to as "clip planes."
-
 
 Out of the box, Unreal Engine supports a global clip plane feature. When enabled, the engine evaluates every vertex against a single 
 plane defined on a per-camera basis to derive its clip distance. The term "global" reflects the fact that this
 boundary applies uniformly to every object rendered by that specific camera—though different cameras can maintain entirely distinct
 global clip planes.
 
+The objective of this implementation is to extend this capability to a per-object basis. By utilizing the exact same
+underlying hardware mechanics, but define the clip plane dynamically per-primitive so that individual objects can maintain
+their own unique cutting boundaries.Because modern graphics APIs support multiple concurrent clip distances, assigning the Per-Object Clip Plane to a dedicated hardware slot ensures seamless coexistence with the native global clip plane.
 
-The goal of our implementation is to extend this capability to a per-object basis. We will leverage the exact same
-underlying hardware mechanics, but define the clip plane dynamically per primitive so that individual objects can maintain
-their own unique cutting boundaries. Since modern graphics APIs support multiple concurrent clip distances, we can assign our
-custom per-object plane to a completely separate hardware slot. This ensures our implementation can seamlessly coexist with the
-engine's native global clip plane. Before diving into the implementation it is important to understand how the clip planes are 
+Before diving into the implementation it is important to understand how the clip planes are 
 represented and the signed distance is calculated.
 
-
-### - The Math: Compact Plane Representation
+### Compact Plane Representation
 
 Mathematically, an infinite plane is defined by the following equation:
 
@@ -96,9 +88,24 @@ Where $\vec{N}$ is the surface normal vector of the plane and $\vec{P}_0$ is an 
 </p>
 
 
-From this equation, it can be deduced that two <CodeInline>FVector3f</CodeInline>s are required to represent a 3D plane in world space. 
-However, it is possible to express a plane in a much more compact form. A 3D plane can be fully defined by a single <CodeInline>FVector4f</CodeInline> if 
-we define $\vec{P}_0$ using the signed distance $D_p$ as follows:
+Evaluating this formulation indicates taht representing a 3D plane in world space requires two <CodeInline>FVector3f</CodeInline>s; 
+one for the plane normal ($\vec{N}$) and another for the surface point ($\vec{P}$).
+
+
+<CodeBlock
+  code={`
+
+struct FMyPlane
+{
+    FVector3f PlaneNormal;
+    FVector3f SurfacePoint;
+};
+`}
+  filename=""
+/>
+
+However, it is totally possible to reduce the memory footprint of a plane by representing it in much more compact form. This special form requires
+the surface point $\vec{P}_0$ to be selected as the following.
 
 <MathBlock
   latex="\vec{P}_0 = D_p * \vec{N}"
@@ -112,29 +119,34 @@ Geometrically, this approach defines $\vec{P_0}$ as the intersection point in be
   <img src="/blog/implementing-per-object-clip-planes/Image_Plane_WithWorldOrigin.svg" alt="PlaneWithWorldOrigin"></img>
 </p>
 
-Under this condition, the plane is elegantly represented by storing the components 
-of the normal vector $\vec{N}$ in the first three elements $(X, Y, Z)$ of the <CodeInline>FVector4f</CodeInline>,
-and the scalar distance $D_p$ in the final $W$ component.
+Under this conditions, a plane can be represented by the plane normal $\vec{N}$ and the plane distance $D_p$ to represent a plane which, can fit into an
+<CodeInline>FVector4f</CodeInline> whose first three elements $(X, Y, Z)$ storing the plane normal and storing $D_p$ as the last element ($W$).
 
-This compact representation reduces the memory footprint of a plane by two floating-point
-values. Furthermore, expressing a plane in this 4D vector format unlocks highly efficient
-methods for performing plane-point distance tests, which we are about to explore in a moment.
+ <CodeBlock
+  code={`
 
-### - Evaluating Point-Plane Distance (The Magic Dot Product)
+struct FMyCompactPlane
+{
+    FVector4f Plane;
+};
+`}
+  filename=""
+/>
 
+This compact representation reduces the memory footprint of each plane by two floating-point values—a 33% reduction in memory overhead per instance. Furthermore, storing the plane in a single 4D vector enables GPU-friendly dot-product instructions during distance evaluation.
+
+### Evaluating Point-Plane Distance (The Magic Dot Product)
 
 When clipping vertices along a plane, calculating the signed distance from a point to that
 plane is an unavoidable necessity. While there are multiple ways to interpret this mathematically,
-one specific geometric interpretation proves incredibly elegant for our implementation.
+one specific geometric interpretation proves incredibly elegant for shader execution.
 
-To ground this concept in our rendering pipeline, we can establish a clean mathematical
-framework by defining a few key variables and our ultimate objective:
+To establish this calculation within the rendering pipeline, the core variables and objectives are defined as follows:
 
-* $\vec{Q}$: The point of interest (the vertex position in world space).
+* $\vec{Q}$: The point of interest, representing the vertex position in world space.
 * $D_Q$: The signed distance of the query point $\vec{Q}$ from the clipping plane,
-  which we will refer to as the clip distance moving forward. Our primary goal is to solve for this value.
+  which is going to be referred to as the clip distance moving forward. The primary goal is to solve for this value.
 * $D_P$: The scalar distance satisfying the equation $\vec{P}_0 = D_P \cdot \vec{N}$. In other words, it represents the signed perpendicular distance of the plane from the world origin along the normal vector.
-
 
 The shortest distance from an arbitrary point to a plane is always measured along a path perpendicular to that plane. Because the plane normal $\vec{N}$ is by definition perpendicular
 to the surface, $D_Q$ can be computed by projecting the query point $\vec{Q}$ onto the plane
@@ -170,7 +182,7 @@ By expanding and slightly rearranging this equation, a magnificent algebraic sho
 />
 
 
-Notice that the left-hand operand is almost identical to our previously discussed 4D 
+Notice that the left-hand operand is almost identical to previously discussed 4D 
 vector representation of the plane, with the minor exception that the distance 
 term $D_P$ is negated. The right-hand operand is simply the query point represented 
 as a homogeneous 4D coordinate, obtained by appending $1$ as its $W$ component. 
@@ -181,18 +193,8 @@ This means that if the $D_p$ term is negated while representing the clip plane, 
 the distance of point $\vec{Q}$ from the clip plane is as trivial as evaluating the dot product of the plane and the point 
 represented as a homogeneous 4D coordinate.
 
-
-
-
-
-
-## - Implementation
-
-Bridging the gap between gameplay code and raw hardware clipping requires establishing a unified, 
-sequential data pipeline that stretches all the way from <CodeInline>UPrimitiveComponent</CodeInline> down to actual shaders.
-We will follow a top-down approach—tracing the data's journey sequentially through
-the engine's architectural layers. Along this path, our primary task is to safely ferry our parameters across the asynchronous 
-Game Thread/Render Thread barrier without risking race conditions, and pack them neatly across the CPU-to-GPU memory interface. 
+## Implementation Blueprint
+Bridging the gap between gameplay logic and raw hardware clipping requires establishing a unified, sequential data pipeline that spans all the way from a primitive component down to the HLSL vertex shaders. A top-down approach is used to trace the data's journey sequentially through Unreal Engine's architectural layers. Along this path, the primary objective is to safely ferry parameters across the asynchronous Game Thread and Render Thread boundary without inviting thread race conditions or memory corruption, before neatly packing them across the CPU-to-GPU memory interface.
 
 
 <p align="center">
@@ -200,32 +202,24 @@ Game Thread/Render Thread barrier without risking race conditions, and pack them
 </p>
 
 
+## Extenting Primitive Component
 
-## Step 1: The Game Thread (Defining the Source Data)
+Needless to say primitive component are one of the core objects of the Unreal Engine's game world. It defines a base class for all components 
+that possesses a visual representation or physical volume in the game world. Therefore, <CodeInline>UPrimitiveComponent</CodeInline> class is selected to be the base class to insert the Per-Object Clip plane implementation to it.
 
+Primitive components plays the role of the starting point in this implementation. It defines the necessary variables to define a clip plane, which is used to derive 
+the clipping boundaries for the object.
 
-### Extending <CodeInline>UPrimitiveComponent</CodeInline>
+Per-Object Clip Plane feature is defined in per-object basis and it is not required to have it enabled on every primitive
+component in the scene, it is required to define a boolean flag parameter, in addition to the plane itself, indicating whether the clip plane is enabled for that primitive or not.
 
-The first step is to extend the <CodeInline>UPrimitiveComponent</CodeInline> class to add support for per-object clip planes. 
-<CodeInline>UPrimitiveComponent</CodeInline> is the base class for any component that possesses a visual 
-representation or physical volume in the game world. Integrating the data required 
-for our per-object clip plane at this level ensures that the feature automatically 
-works with static meshes, skeletal meshes, and any other custom primitives that inherit
-from this base class.
-
-
-It is required to store three pieces of information to support this future :
+With the current setup, the variables to defines are the following
 
 * A boolean flag indicating whether the component has an active per-object clip plane.
 
 * A <CodeInline>FVector3f</CodeInline> representing the surface normal vector of the clip plane in world space.
 
 * A floating-point value representing the signed perpendicular distance of the clip plane from the world origin.
-
-
-Because this structural data will eventually be exposed to technical artists and designers
-in the editor, it is worth keeping the interface intuitive, self-explanatory, and 
-well-documented within the details panel.
 
 <Notification>
 <CodeInline>//...</CodeInline> and other <CodeInline>...</CodeInline> notations are used to denote omitted code, that is not relevant 
@@ -264,10 +258,8 @@ class UPrimitiveComponent : public USceneComponent ....
   filename="PrimitiveComponent.h"
 />
 
-### Handling Runtime Modifications
-
-Properties are not that handy if we can't modify them at runtime by an external code.
-The most straightforward way to modify the values is to expose getters and setters for them.
+Properties are not that handy if they cannot be modified at runtime by an external code.
+The most straightforward way is to define a set of getters and setters.
 
 <CodeBlock
   code={`
@@ -323,9 +315,17 @@ In Unreal Engine, gameplay logic is executed on the Game Thread (GT), while rend
 To safely handle this multi-threaded split, the engine creates mirrored representation objects on the RT for components living on the GT.
 These objects are known as Scene Proxies. Each proxy contains only the rendering-specific data required by the GPU and has no direct access to the source component's state or logic.
 <Notification>
-Actually the same pattern is used on game thread - physics context, but with physics proxies
-instead
+The same pattern is preserved with game thread - physics context, but with physics proxies
+instead.
 </Notification>
+
+Per-object clip plane parameters are no exception to this rule and they are required to be synchronized everytime 
+The same pattern should be preserved with the per-object clip plane parameters as well. They are required to be in sync with the corresponding scene proxy.
+Mirror variable
+Per-Object Clip Plane variables defined in <CodeInline>UPrimitiveComponent</CodeInline> should
+Since newly created <
+
+
 However, simply creating these mirrored objects is not enough; the engine must also keep them synchronized with their source components.
 Because copying data for every proxy on every single frame would severely degrade frame rates, Unreal Engine
 utilizes an event-driven synchronization system based on three distinct mechanisms:
@@ -1043,13 +1043,130 @@ struct FPrimitiveUniformShaderParametersBuilder
   filename="PrimitiveUniformShaderParameters.h"
 />
 
+### Packing and Unpacking
+
+After completing the the primitive uniform buffer data modification we need to do two more things before dealing with shaders and finally using the that we've carried this far; packing and unpacking.
+Even though we modified the uniform buffer we didn't changed how it gets packed before being sent to the GPU as well as its unpacking process at GPU side. Lets deal with one problem at a time.
+
+#### Packing
+
+With the current changes that we have made custom primitive float data is shifted by one <CodeInline>FVector4f</CodeInline> and we put per-object clip plane information into that place. We need to do the same
+with the packing process. <CodeInline>FPrimitiveSceneShaderData::Setup(const FPrimitiveUniformShaderParameters& PrimitiveUniformShaderParameters, FVector4f* RESTRICT OutData)</CodeInline> function gets called
+to serialize the primitive uniform shader parameters to a stream of <CodeInline>FVector4f</CodeInline>'s. Inspect the following code:
+
+
+<CodeBlock
+  code={`
+
+struct FPrimitiveUniformShaderParametersBuilder
+{
+  .
+  .
+  .
+  void FPrimitiveSceneShaderData::Setup(const FPrimitiveUniformShaderParameters& PrimitiveUniformShaderParameters, FVector4f* RESTRICT OutData)
+  {
+    static_assert(NUM_LIGHTING_CHANNELS == 3, "The FPrimitiveSceneShaderData packing currently assumes a maximum of 3 lighting channels.");
+
+    // Note: layout must match GetPrimitiveData in usf
+
+    Store4(OutData, 0,
+      PrimitiveUniformShaderParameters.Flags,
+      PrimitiveUniformShaderParameters.InstanceSceneDataOffset,
+      PrimitiveUniformShaderParameters.NumInstanceSceneDataEntries,
+      (uint32)PrimitiveUniformShaderParameters.SingleCaptureIndex | ((PrimitiveUniformShaderParameters.VisibilityFlags & 0xFFFFu) << 16u));
+
+    Store4(OutData, 1,
+      PrimitiveUniformShaderParameters.PositionHigh.X,
+      PrimitiveUniformShaderParameters.PositionHigh.Y,
+      PrimitiveUniformShaderParameters.PositionHigh.Z,
+      PrimitiveUniformShaderParameters.PrimitiveComponentId);
+
+    // Pack these matrices into the buffer as float3x4 transposed
+    StoreTransposed(OutData, 2, PrimitiveUniformShaderParameters.LocalToRelativeWorld);
+    StoreTransposed(OutData, 5, PrimitiveUniformShaderParameters.RelativeWorldToLocal);
+    StoreTransposed(OutData, 8, PrimitiveUniformShaderParameters.PreviousLocalToRelativeWorld);
+    StoreTransposed(OutData, 11, PrimitiveUniformShaderParameters.PreviousRelativeWorldToLocal);
+    StoreTransposed(OutData, 14, PrimitiveUniformShaderParameters.WorldToPreviousWorld);
+    
+    .
+    .
+    .
+
+    Store4(OutData, 33,
+      PrimitiveUniformShaderParameters.MeshPaintTextureDescriptor.X,
+      PrimitiveUniformShaderParameters.MeshPaintTextureDescriptor.Y,
+      0u, 0u);
+ 
+    // Set all the custom primitive data float4. This matches the loop in SceneData.ush
+    const int32 CustomPrimitiveDataStartIndex = 34;
+    for (int32 DataIndex = 0; DataIndex < FCustomPrimitiveData::NumCustomPrimitiveDataFloat4s; ++DataIndex)
+    {
+      OutData[CustomPrimitiveDataStartIndex + DataIndex] = PrimitiveUniformShaderParameters.CustomPrimitiveData[DataIndex];
+    }
+  }
+}
+  .
+  .
+  .
+`}
+  filename="PrimitiveUniformShaderParameters.h"
+/>
+
+We need to change the function obove in a way that it passes our per-object clip plane information correctly. First of all we are going to put that information just before custom primitive floats are set
+as we did in the primitive uniform buffer. And later we should put our information to that memory chunk.
+
+<CodeBlock
+  code={`
+
+struct FPrimitiveUniformShaderParametersBuilder
+{
+  .
+  .
+  .
+  void FPrimitiveSceneShaderData::Setup(const FPrimitiveUniformShaderParameters& PrimitiveUniformShaderParameters, FVector4f* RESTRICT OutData)
+  {
+    
+    .
+    .
+    .
+
+    Store4(OutData, 33,
+      PrimitiveUniformShaderParameters.MeshPaintTextureDescriptor.X,
+      PrimitiveUniformShaderParameters.MeshPaintTextureDescriptor.Y,
+      0u, 0u);
+
+    	Store4(OutData, 34
+      , PrimitiveUniformShaderParameters.PerObjectClipPlane.X
+      , PrimitiveUniformShaderParameters.PerObjectClipPlane.Y
+      , PrimitiveUniformShaderParameters.PerObjectClipPlane.Z
+      , PrimitiveUniformShaderParameters.PerObjectClipPlane.W);
+
+    // Set all the custom primitive data float4. This matches the loop in SceneData.ush
+    const int32 CustomPrimitiveDataStartIndex = 35; // We changed the starting index from 34 to 35.
+    for (int32 DataIndex = 0; DataIndex < FCustomPrimitiveData::NumCustomPrimitiveDataFloat4s; ++DataIndex)
+    {
+      OutData[CustomPrimitiveDataStartIndex + DataIndex] = PrimitiveUniformShaderParameters.CustomPrimitiveData[DataIndex];
+    }
+  }
+}
+  .
+  .
+  .
+`}
+  filename="PrimitiveUniformShaderParameters.h"
+/>
+
+With that, packing process is completed. It is time to handle the unpacking process at the GPU side.
+
+All these information is unpacked to a strucutre called <CodeInline>FPrimitiveSceneData</CodeInline> (which is defined in <CodeInline>SceneData.ush</CodeInline> file). 
+This structure is a mirror of the primitive uniform shader parameters.  
 
 ## unpacking
 
-I'm sorry to tell you but I lied. The recent changes broke the renderer and it works incorrectly at the moment. With the current modifications
+The recent changes broke the renderer and it works incorrectly at the moment. With the current modifications
 made on <CodeInline>FPrimitiveUniformShaderParameters</CodeInline> we changed the structure of the information that is being send to the GPU and altered the packing behavior but 
-didn't changed the other side of the pipe, unpacking at the GPU. 
- Currently we are sending the <CodeInline>bPerObjectClipPlaneEnabled</CodeInline> flag as the LSB of the <CodeInline>Flags</CodeInline>
+didn't changed the other side of the pipe, unpacking at the GPU.  
+Currently we are sending the <CodeInline>bPerObjectClipPlaneEnabled</CodeInline> flag as the LSB of the <CodeInline>Flags</CodeInline>
 parameter and <CodeInline>PerObjectClipPlane</CodeInline> as the last <CodeInline>FVecto4f</CodeInline> or the last 32 bits of the <CodeInline>FPrimitiveUniformShaderParameters</CodeInline> structure.
 
 <p align="center">
@@ -1062,6 +1179,106 @@ put our parameter right before custom primitive floats data (for sake of simplic
 unpacking code it corrupts the whole custom primitive floats data. The first float secretly maps to our per object clip plane information and the first custom primitive float data
 can only be accessed through the second one and so on. 
 It is required to be fixed to complete out implementation and most importantly left the engine working after the implementation.
+
+We are going to start with <CodeInline>bPerObjectClipPlaneEnabled</CodeInline> but first it is reqiured to get some information about how GPU unpacks the data sent by the CPU.
+
+
+<CodeInline>FPrimitiveSceneData</CodeInline> is the GPU correspondance of the FPrimitiveSceneShaderData sent by the GPU. The packed contents gets unpacket to a <CodeInline>FPrimitiveSceneData</CodeInline> instance.
+This is done by calling <CodeInline>GetPrimiveData</CodeInline> it with an integet argument named as <CodeInline>PrimitiveID</CodeInline> indicating which primitive to get the primitive data of. 
+To make packing and unpacking compatible it is required to extent <CodeInline>FPrimitiveSceneData</CodeInline> as <CodeInline>FPrimitiveUniformShaderParameters</CodeInline>. 
+
+<CodeBlock
+  code={`
+struct FPrimitiveSceneData
+{
+	uint		Flags;
+	uint		VisibilityFlags;
+	int			InstanceSceneDataOffset; // Link to the range of instances that belong to this primitive
+	int			NumInstanceSceneDataEntries;
+	int			PersistentPrimitiveIndex;
+	uint		SingleCaptureIndex; // TODO: Use 16 bits? 8 bits?
+	float3		PositionHigh;
+	uint		PrimitiveComponentId; // TODO: Refactor to use PersistentPrimitiveIndex, ENGINE USE ONLY - will be removed
+	FDFMatrix	LocalToWorld;
+	FDFInverseMatrix WorldToLocal;
+	FDFMatrix	PreviousLocalToWorld;
+	FDFInverseMatrix PreviousWorldToLocal;
+	float4x4	WorldToPreviousWorld; // NOTE: Intentionally not LWC
+	float3		InvNonUniformScale;
+	float		ObjectBoundsX;
+	FDFVector3	ObjectWorldPosition;
+	FDFVector3	ActorWorldPosition;
+	float		MinMaterialDisplacement;
+	float		MaxMaterialDisplacement;
+#if PRIMITIVE_HAS_TILEOFFSET_DATA
+	FLWCVector3	ObjectWorldPositionTO;
+	FLWCVector3	ActorWorldPositionTO;
+#endif
+	float		ObjectRadius;
+	uint		LightmapUVIndex;   // TODO: Use 16 bits? // TODO: Move into associated array that disappears if static lighting is disabled
+	float3		ObjectOrientation; // TODO: More efficient representation?
+	uint		LightmapDataIndex; // TODO: Use 16 bits? // TODO: Move into associated array that disappears if static lighting is disabled
+	float4		NonUniformScale;
+	float3		PreSkinnedLocalBoundsMin;
+	uint		NaniteResourceID;
+	float3		PreSkinnedLocalBoundsMax;
+	uint		NaniteHierarchyOffset;
+	float3		LocalObjectBoundsMin;
+	float		ObjectBoundsY;
+	float3		LocalObjectBoundsMax;
+	float		ObjectBoundsZ;
+	uint		InstancePayloadDataOffset;
+	uint		InstancePayloadDataStride;
+	uint		InstancePayloadExtensionSize;
+	float3		InstanceLocalBoundsCenter;
+	float3		InstanceLocalBoundsExtent;
+	float3		WireframeColor; // TODO: Should refactor out all editor data into a separate buffer
+	float3		PrimitiveColor; // TODO: Should refactor out all editor data into a separate buffer
+	uint		PackedNaniteFlags;
+	float2 		InstanceDrawDistanceMinMaxSquared;
+	float		InstanceWPODisableDistanceSquared;
+	uint		NaniteRayTracingDataOffset;
+	float		MaxWPOExtent;
+	uint		CustomStencilValueAndMask;
+	float		PixelProgrammableDistanceSquared;
+	float		MaterialDisplacementFadeOutSize;
+	uint2		MeshPaintTextureDescriptor;
+	float4		CustomPrimitiveData[NUM_CUSTOM_PRIMITIVE_DATA]; // TODO: Move to associated array to shrink primitive data and pack cachelines more effectively
+};
+`}
+  filename="SceneData.ush"
+/>
+
+
+
+<CodeInline>bPerObjectClipPlaneEnabled</CodeInline>
+flag is already in place as the last bit of the <CodeInline>Flags</CodeInline> variable. But that is not the same with <CodeInline>PerObjectClipPlane</CodeInline>. CPU side packes that variable as the 34.th 
+<CodeInline>34.th</CodeInline> of the buffer but the GPU side of the code simply omits it and starts unpacking the custom primitive floats from that index. Before changing this behavior it is required to has 
+a variable in <CodeInline>FPrimitiveSceneData</CodeInline> so that we can put the clip plane information into that variale while unpacking the data stream.  
+
+
+<CodeBlock
+  code={`
+struct FPrimitiveSceneData
+{
+	uint		Flags;
+	uint		VisibilityFlags;
+	.
+  .
+  .
+	uint2		MeshPaintTextureDescriptor;
+  float4		PerObjectClipPlane; // Here is the variable that we allocate to store clip plane the information
+	float4		CustomPrimitiveData[NUM_CUSTOM_PRIMITIVE_DATA]; // TODO: Move to associated array to shrink primitive data and pack cachelines more effectively
+};
+`}
+  filename="SceneData.ush"
+/>
+
+Extending the <CodeInline>FPrimitiveSceneData</CodeInline> was fairly easy. Let us get to unpacking process to that we can correctly unpack the clip plane information starting with the unpacking function 
+<CodeInline>GetPrimitiveSceneData</CodeInline>
+
+All shaders uses <CodeInline>GetPrimiveData(uint PrimiveID)</CodeInline> to get acess to t
+
 
 Lets start with the trivial one <CodeInline>bPerObjectClipPlaneEnabled</CodeInline>. On GPU all the packed data sent via <CodeInline>FPrimitiveUniformShaderParameters</CodeInline> 
 is unpacked to another struct called <CodeInline>FPrimitiveSceneData</CodeInline> which contains all the information about a primitive on the GPU side. I can be thought as the GPU representation
@@ -1401,8 +1618,10 @@ Calculation is trivial, it is only required to add the camera world position to 
 Upon completion of this phase, we can get to the other two variables <CodeInline>bPerObjectClipPlaneEnabled</CodeInline>, <CodeInline>ClipPlane</CodeInline>. 
 The issue that makes accessing those informations a little bit harder is those information's being a property of the object rather than the vertex itself. Position is a property of the the vertex itself
 but <CodeInline>bPerObjectClipPlaneEnabled</CodeInline> and <CodeInline>ClipPlane</CodeInline> properties belongs to the object which owns the vertex itself. Therefore we need to access the 
-data that we sent to the GPU to read those informations. If we continue with 
-We are lucky that no camera orientation is involved since this is a basic distance calculation. With that being 
+data that we sent to the GPU to read those informations.
 
-**Accessing** <CodeInline>bPerObjectClipPlaneEnabled</CodeInline> :
+To do that we are going to use vertex factory inputs to get access to scene data of the primitive hance <CodeInline>bPerObjectClipPlaneEnabled</CodeInline> and <CodeInline>PerObjectClipPlane</CodeInline> variables.
+
+
+
 
