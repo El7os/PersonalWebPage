@@ -309,41 +309,24 @@ void UPrimitiveComponent::SetPerObjectClipPlane(const FVector& PlaneNormal, floa
   filename=""
 />
 
-## Scene Proxies and Game - Render Thread Synchronization
+## Scene Proxies
 
-In Unreal Engine, gameplay logic is executed on the Game Thread (GT), while rendering operations—such as updating vertex buffers and managing textures—occur on the Render Thread (RT).
-To safely handle this multi-threaded split, the engine creates mirrored representation objects on the RT for components living on the GT.
-These objects are known as Scene Proxies. Each proxy contains only the rendering-specific data required by the GPU and has no direct access to the source component's state or logic.
+In Unreal Engine, gameplay logic is executed on the Game Thread (GT), while rendering operations—such as updating vertex buffers and managing textures—occur asynchronously on the Render Thread (RT).
+To safely handle this multi-threaded split, the engine creates mirrored representation objects on the render thread for components living on the game thread.
+These objects are known as Scene Proxies. 
+
+Different game object types can be represented by distinct proxy classes. For instance, an <CodeInline>UPrimitiveComponent</CodeInline> is represented by a 
+<CodeInline>FPrimitiveSceneProxy</CodeInline>, whereas an <CodeInline>USkyLightComponent</CodeInline> is 
+represented by a proxy of type <CodeInline>FSkyLightSceneProxy</CodeInline>. Each proxy stores only the rendering-specific data required by the GPU and has no direct access to the source component's state or logic.
+
 <Notification>
 The same pattern is preserved with game thread - physics context, but with physics proxies
 instead.
 </Notification>
 
-Per-object clip plane parameters are no exception to this rule and they are required to be synchronized everytime 
-The same pattern should be preserved with the per-object clip plane parameters as well. They are required to be in sync with the corresponding scene proxy.
-Mirror variable
-Per-Object Clip Plane variables defined in <CodeInline>UPrimitiveComponent</CodeInline> should
-Since newly created <
-
-
-However, simply creating these mirrored objects is not enough; the engine must also keep them synchronized with their source components.
-Because copying data for every proxy on every single frame would severely degrade frame rates, Unreal Engine
-utilizes an event-driven synchronization system based on three distinct mechanisms:
-
-1. Initialization on Creation: A scene proxy is instantiated for every rendering-related component when that component
-   is registered with the scene. During its construction, the proxy pulls all relevant data from the source component,
-   starting its lifecycle perfectly synchronized.
-2. In-Place Dynamic Updates: An existing scene proxy can be updated dynamically to reflect runtime changes made on its source component.
-   For example, modifying a component's Custom Primitive Data (CPD) floats triggers a targeted update that pushes only the modified values to the existing proxy.
-3. Recreation (Teardown and Rebuild): If an existing proxy cannot be modified in place to reflect a specific change, it is destroyed and completely recreated,
-   forcing full synchronization during construction. A prime example of this is toggling a light's shadow-casting property; 
-   because of cached lighting interactions with the scene, updating the active proxy dynamically is not supported. Instead, the engine tears down and rebuilds the proxy.
-   This recreation method is also the standard mechanism for applying structural changes made at edit time via the Details Panel, even if an in-place update pathway exists.
-   It is required to call <CodeInline>MarkRenderStateDirty</CodeInline> to tell the engine that current state of the proxy does no longer represents the contemporary rendering 
-   state of the source component, hence to recreate the existing proxy.
-
-Before covering any of the mechanisms above it is required to define the mirror variables inside the <CodeInline>FPrimitiveSceneProxy</CodeInline>. 
-The main focus of all the synchronization process is going to be copying the actual properties from the source component to the mirror component.
+Although data can flow in either direction, information typically moves from the source component to the proxy.
+The core challange of having a mirror object to live on another thread is keeping them synchornized as the game state changes.
+Before diving down how synchronization is performed it is required to extent the <CodeInline>FPrimitiveSceneProxy</CodeInline> so that it can have the variables to be synchronized in the first place.
 
 <CodeBlock
   code={`
@@ -354,7 +337,7 @@ struct FPrimitiveSceneProxy
   /** Enable per object clip plane on this object, it is not used if r.Allow.GlobalClipPlane is not enabled.*/
   uint8 bPerObjectClipPlaneEnabled : 1;
  
-      	
+        
   /**
   * Per object clip plane defined in global space
   * (x,y,z) represents the plane normal in world space (normalized)
@@ -368,11 +351,23 @@ struct FPrimitiveSceneProxy
   filename=""
 />
 
+Engine utilizes an event-driven system to provide component-proxy synchronization. Because thousands of component-proxy pairs may exist concurrently, polling or updating every proxy per frame would severely degrade frame rates. The system has three distinct mechanisms for proxy synchronization:
+
+1. Initialization on Creation: When a rendering-related component registers with the scene, its corresponding scene proxy is instantiated. During construction, 
+   the proxy reads all relevant parameters from the source component, beginning its lifecycle in a synchronized state.
+2. In-Place Dynamic Updates: An existing scene proxy can be updated dynamically to reflect runtime changes made on its source component.
+   For example, modifying a component's Custom Primitive Data (CPD) floats triggers a targeted update that pushes only the modified values to the existing proxy.
+3. Recreation (Teardown and Rebuild): If an existing proxy cannot be modified in place to reflect a specific change, it is destroyed and completely recreated,
+   forcing full synchronization during construction. A prime example of this is toggling a light's shadow-casting property; 
+   because of cached lighting interactions with the scene, updating the active proxy dynamically is not supported. Instead, the engine tears down and rebuilds the proxy.
+   This recreation method is also the standard mechanism for applying structural changes made at edit time via the Details Panel, even if an in-place update pathway exists.
+   It is required to call <CodeInline>MarkRenderStateDirty</CodeInline> to tell the engine that current state of the proxy does no longer represents the contemporary rendering 
+   state of the source component, hence to recreate the existing proxy.
 
 
 ### Initialization on Creation
 
-The pattern the engine follows here is to derive an intermediatery description of the component and use that component to create a scene proxy. The main reason of this indirect approach is to
+The pattern the engine follows here is to derive an intermediatery description of the component and use that object to create a scene proxy. The main reason of this indirect approach is to
 provide the ability to store a description to create a scene proxy later with or without the source component being presented at the time. 
 
 <Notification emoji="❔"> 
@@ -384,7 +379,7 @@ To learn more see How Small Open Doors Can Lead to Better CPU Utilization and Bi
 </p>
 
 
-Think of <CodeInline>FPrimitiveSceneProxyDesc</CodeInline> as a photocopy of the component made on the game thread: lightweight, immutable for the handoff, and safe to read when the render thread builds proxies. 
+Think <CodeInline>FPrimitiveSceneProxyDesc</CodeInline> as a photocopy of the component made on the game thread: lightweight, immutable for the handoff, and safe to read when the render thread builds proxies. 
 We are going to extend the description first so clip-plane data crosses the thread boundary in the same pattern Unreal already uses for bounds, flags, and material relevance. And than these informations
 are going to be copied into the proxy.
 
