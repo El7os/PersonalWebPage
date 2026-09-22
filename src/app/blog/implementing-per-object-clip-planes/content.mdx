@@ -395,7 +395,7 @@ struct FPrimitiveSceneProxyDesc
 {
     FPrimitiveSceneProxyDesc()
     {
-      //...
+      //... 
       bPerObjectClipPlaneEnabled = false;
       PerObjectClipPlane = FVector4(0.0f, 0.0f, 0.0f, 0.0f);
       //...
@@ -688,7 +688,74 @@ void UPrimitiveComponent::SetPerObjectClipPlane(const FVector& PlaneNormal, floa
 />
 
 
-## Step 2: The GPU Scene Pipeline (Inducing the Builder)
+## Setting Up The Uniform Buffers
+
+At this point primitive scene proxies are fully synchroinized to the per-object clip plane state of the source component.
+However, this information is still not usable since it resides onm the CPU and has not been sent out to the GPU, which is the next step of the implementation.
+Sending information to the GPU is not like updating a variable on an Actor or pushing data to the user interface for display, it is significantly more complex and error prone.
+
+While there are several ways to transform data to the GPU, only one is relevant to this implementation: uniform buffers.
+Uniform buffers are dedicated GPU memory regions that store data shared across shader execution. They can be accessed by shader threads and generally contain information about the shader state, the object being rendered or the state of the computation. 
+
+A uniform buffer cannot be mutated by shader code, but it can be updated by the CPU which becomes handy when applying the same shader to different object or different contexts. For instance when unreal compiles the shader out of a material it does not change or recompile it for every object insance that uses the same material. It only updates the uniform buffers dedicated to that shader with the information of the object being drawn.
+
+Because per-obeject clip plane parameters are a part of the objects render state and does not change depending on the vertex being computed or the pixel being drawn 
+they are ideal candidates to put into an uniform buffer. 
+
+Since they are basically raw memory regions they can contain any type of information. This may not seem like an issue at first glance but since it can contain any information knowing the memory layout of the buffer becomes a problem. It is not possible to tell if an eight bits long uniform contains eight different boolean flags or an unsigned integer size of a byte by just looking at the raw memory in the buffer. Knowing the memory layout of the information beforehand is crucial, otherwise it would be playing lottery with the raw memory to get a meaningfull information out of it.
+
+<Notification>
+Actually the same issue exists on the CPU side as well when dealing with raw memory or reading through a binary file which requires to know the memory layout and the 
+type of the data before reading the memory chunk or the file.
+</Notification>
+
+An uniform buffer has to be read by following the rules of the memory layout just as the same layout as it is sent from the CPU. Even shifting a single bit would corrupt the whole buffer. Therefore it is safe to say that it requires a hidden contract in between CPU and GPU.
+
+<p align="center">
+  <img src="/blog/implementing-per-object-clip-planes/Image_MemoryInterpretation.svg" alt="Plane"></img>
+</p>
+
+
+Once a scene is ready unreal creates an uniform buffer containing any information releated to the world and in that buffer there is an array of structures whose each
+element contains rendering information releated to a single primitive proxy. The name of that structre is <CodeInline>FPrimitiveUniformShaderParameters</CodeInline> 
+and it basically contains a list of properties such as custom stencil value, visibility flags, object position, or custom primitive floats which are then sent out to the GPU.
+
+
+<CodeBlock
+  code={`
+
+/** 
+* The uniform shader parameters associated with a primitive. 
+* Note: Must match FPrimitiveSceneData in shaders.
+* Note 2: Try to keep this 16 byte aligned. i.e |Matrix4x4|Vector3,float|Vector3,float|Vector4|  _NOT_  |Vector3,(waste padding)|Vector3,(waste padding)|Vector3. Or at least mark out padding if it can't be avoided.
+*/
+BEGIN_GLOBAL_SHADER_PARAMETER_STRUCT(FPrimitiveUniformShaderParameters,ENGINE_API)
+    SHADER_PARAMETER(uint32,    Flags)
+    //...
+    SHADER_PARAMETER(float,     PixelProgrammableDistanceSquared)
+    SHADER_PARAMETER(float,     MaterialDisplacementFadeOutSize)
+    SHADER_PARAMETER(FUintVector2,  MeshPaintTextureDescriptor)
+    SHADER_PARAMETER(uint32,    NaniteRayTracingDataOffset)
+    SHADER_PARAMETER(float,     MaxWPOExtent)
+    SHADER_PARAMETER(uint32,    CustomStencilValueAndMask)
+    SHADER_PARAMETER(uint32,    VisibilityFlags)
+    SHADER_PARAMETER_ARRAY(FVector4f, CustomPrimitiveData, [FCustomPrimitiveData::NumCustomPrimitiveDataFloat4s]) // Custom data per primitive that can be accessed through material expression parameters and modified through UStaticMeshComponent
+END_GLOBAL_SHADER_PARAMETER_STRUCT()
+`}
+  filename="PrimitiveUniformShaderParameters.h"
+/>
+
+It is safe to say that <CodeInline>FPrimitiveUniformShaderParameters</CodeInline>'s are basically the GPU representations of a primitive scene proxy
+
+
+Unreal solves all those issues by making a what every game engine does, puts an abstraction layer on top of it. It allows developers to define uniform buffer layouts in CPU code and handles the rest of it automatically. Several macros are defined to be used for this purpose such as <CodeInline>BEGIN_GLOBAL_SHADER_PARAMETER_STRUCT</CodeInline> and <CodeInline>END_GLOBAL_SHADER_PARAMETER_STRUCT</CodeInline>, which starts the body of uniform buffer struct and ends it respectfully.
+
+There are several examples to those type of structures but only of them is releated to this implementaion, .
+Once a scene is ready to be rendered unreal creates an uniform buffer containing 
+
+
+
+Step 2: The GPU Scene Pipeline (Inducing the Builder)
 
 All the implementation required to carry the information from the game thread to the proxies at the render thread is done.
 The next step is to carry the information to the GPU before using those values in shaders to cull actual vertices.
