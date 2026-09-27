@@ -216,7 +216,7 @@ export default function TableOfContents() {
                   color:       'rgba(255,255,255,0.35)',
                 }}
               >
-                Contents
+                {'// contents'}
               </span>
             )}
 

@@ -128,6 +128,47 @@ a {
   border-color: rgba(255, 255, 255, 0.2);
 }
 
+/* ── Coder-style accents ─────────────────────────────────────────────────── */
+
+.mono {
+  font-family: var(--font-mono);
+}
+
+.nav-links {
+  display: flex;
+  gap: 1.75rem;
+  font-size: 0.95rem;
+}
+
+@media (max-width: 560px) {
+  .nav-links {
+    gap: 0.9rem;
+    font-size: 0.82rem;
+  }
+}
+
+/* Block cursor that blinks after the active nav link */
+.cursor-blink {
+  display: inline-block;
+  width: 0.55em;
+  height: 1em;
+  margin-left: 0.2em;
+  vertical-align: -0.12em;
+  background: var(--accent-color);
+  opacity: 0.8;
+  animation: cursor-blink 1.1s steps(1) infinite;
+}
+
+@keyframes cursor-blink {
+  50% { opacity: 0; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .cursor-blink {
+    animation: none;
+  }
+}
+
 /* Table of contents scrollbar — thin gray thumb, no track */
 .toc-scroll {
   scrollbar-width: thin;

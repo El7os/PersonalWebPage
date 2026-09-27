@@ -29,20 +29,27 @@ export default function Navigation({ children }: { children: React.ReactNode }) 
                 alignItems: 'center'
             }}>
                 <div className="container" style={{ display: 'flex', justifyContent: 'flex-end', alignItems: 'center', width: '100%' }}>
-                    <div style={{ display: 'flex', gap: '2rem' }}>
-                        {navLinks.map((link) => (
-                            <Link
-                                key={link.path}
-                                href={link.path}
-                                style={{
-                                    color: pathname === link.path ? '#fff' : 'var(--text-muted)',
-                                    fontWeight: pathname === link.path ? '600' : '400',
-                                    transition: 'color 0.3s ease'
-                                }}
-                            >
-                                {link.name}
-                            </Link>
-                        ))}
+                    <div className="mono nav-links">
+                        {navLinks.map((link) => {
+                            const isActive = pathname === link.path;
+                            return (
+                                <Link
+                                    key={link.path}
+                                    href={link.path}
+                                    aria-current={isActive ? 'page' : undefined}
+                                    style={{
+                                        color: isActive ? '#fff' : 'var(--text-muted)',
+                                        fontWeight: isActive ? '600' : '400',
+                                        transition: 'color 0.3s ease'
+                                    }}
+                                >
+                                    {/* Prompt marker is always rendered so the active link doesn't shift its neighbours */}
+                                    <span aria-hidden="true" style={{ color: 'var(--accent-color)', visibility: isActive ? 'visible' : 'hidden' }}>{'> '}</span>
+                                    {link.name.toLowerCase()}
+                                    {isActive && <span className="cursor-blink" aria-hidden="true" />}
+                                </Link>
+                            );
+                        })}
                     </div>
                 </div>
             </nav>
@@ -63,7 +70,11 @@ export default function Navigation({ children }: { children: React.ReactNode }) 
                         <a href="https://github.com/El7os" target="_blank" rel="noreferrer" style={{ transition: 'color 0.3s', color: '#888' }} onMouseOver={(e) => (e.currentTarget.style.color = '#fff')} onMouseOut={(e) => (e.currentTarget.style.color = '#888')}>GitHub</a>
                         <a href="https://www.linkedin.com/in/eminyahyaarabacı/" target="_blank" rel="noreferrer" style={{ transition: 'color 0.3s', color: '#888' }} onMouseOver={(e) => (e.currentTarget.style.color = '#fff')} onMouseOut={(e) => (e.currentTarget.style.color = '#888')}>LinkedIn</a>
                     </div>
-                    <p>© {new Date().getFullYear()} Personal Game Dev Portfolio. All rights reserved.</p>
+                    <p className="mono" style={{ fontSize: '0.85rem' }}>
+                        <span aria-hidden="true" style={{ color: 'var(--accent-color)', opacity: 0.6 }}>{'/* '}</span>
+                        © {new Date().getFullYear()} Personal Game Dev Portfolio. All rights reserved.
+                        <span aria-hidden="true" style={{ color: 'var(--accent-color)', opacity: 0.6 }}>{' */'}</span>
+                    </p>
                 </div>
             </footer>
         </>

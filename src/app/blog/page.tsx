@@ -26,7 +26,8 @@ export default function Blog() {
             <div style={{ display: 'flex', flexDirection: 'column', gap: '2rem' }}>
                 {posts.map((post) => (
                     <article key={post.slug} className="glass-panel" style={{ padding: '2.5rem', transition: 'all 0.3s' }}>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: '1rem', marginBottom: '1rem', fontSize: '0.9rem', color: '#888' }}>
+                        <div className="mono" style={{ display: 'flex', alignItems: 'center', gap: '1rem', marginBottom: '1rem', fontSize: '0.85rem', color: '#888' }}>
+                            <span aria-hidden="true" style={{ color: 'var(--accent-color)', opacity: 0.6 }}>{'//'}</span>
                             <time>{post.date}</time>
                             <span>•</span>
                             <span>{post.readTime}</span>
