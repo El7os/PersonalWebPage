@@ -178,6 +178,7 @@ export default function TableOfContents() {
       >
         {/* ── Main panel ── */}
         <div
+          className="toc-scroll"
           style={{
             flex:           1,
             overflowY:      'auto',
