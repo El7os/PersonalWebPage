@@ -28,10 +28,7 @@ export default function Navigation({ children }: { children: React.ReactNode }) 
                 display: 'flex',
                 alignItems: 'center'
             }}>
-                <div className="container" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', width: '100%' }}>
-                    <div style={{ fontWeight: 'bold', fontSize: '1.2rem', color: '#fff' }}>
-                        <Link href="/">DEV<span style={{ color: 'var(--accent-color)' }}>PORTFOLIO</span></Link>
-                    </div>
+                <div className="container" style={{ display: 'flex', justifyContent: 'flex-end', alignItems: 'center', width: '100%' }}>
                     <div style={{ display: 'flex', gap: '2rem' }}>
                         {navLinks.map((link) => (
                             <Link
