@@ -1,74 +1,67 @@
 ## Introduction
 In modern real-time rendering, specialized visual effects, gameplay mechanics, and visualization tools often require geometry to be dynamically clipped.
-While Unreal Engine 5 provides robust support for global clip planes—typically utilized for planar water reflections—it 
+While Unreal Engine 5 provides robust support for global clip planes—typically utilized for planar water reflections—it
 lacks out-of-the-box support for isolating this behavior on a per-object basis.
 
-When global clip planes are enabled, Unreal Engine uses one of the hardware's clip-distance slots to discard vertices before rasterization.
-The plane's position and orientation are defined per camera, which is ideal for reflections; however, this applies uniformly 
-to every object that the camera draws. While different cameras can carry different global planes, every primitive within a single 
+When global clip planes are enabled, Unreal Engine uses one of the hardware's clip-distance slots to discard geometry before rasterization.
+The plane's position and orientation are defined per camera, which is ideal for reflections; however, this applies uniformly
+to every object that the camera draws. While different cameras can carry different global planes, every primitive within a single
 view shares the same cutting boundary. This global scope is the exact bottleneck our implementation addresses.
 
-The Per-Object Clip Plane implementation described here is positioned as an extension to existing global clip plane other than a discrete implementation.
-While the framework presented in this document serves as an extention, it is possible to construct a fully standalone implementation as well.
-
-Modern graphics APIs typically expose six to eight hardware clip-distance slots simultaneously. Unreal Engine utilizes the first clip distance value to 
-clip vertices using global clip plane. This implementation occupies a different slot than the engine's global clip plane so that both can coexist: water reflections 
-retain their camera-driven plane, while individual objects can carry their own.
-
-Implementing per-object clip planes allows developers to slice, hollow out, or selectively cull geometry on specific primitives without 
-affecting adjacent elements in the scene. This capability is crucial for applications ranging from architectural visualizations and medical 
+Implementing per-object clip planes allows developers to slice, hollow out, or selectively cull geometry on specific primitives without
+affecting adjacent elements in the scene. This capability is crucial for applications ranging from architectural visualizations and medical
 imaging to sci-fi cross-section effects.
 
-The goal is to extend Unreal Engine's existing global clip-plane architecture by defining the plane used to derive clip distances 
-on a per-object basis, enabling each primitive to expose its own independent cutting boundary. This utilizes the same underlying 
-hardware feature and identical dot-product mathematics, but introduces a separate control lane that artists and gameplay systems 
-can drive independently.
+The Per-Object Clip Plane implementation described here is positioned as an extension to the existing global clip plane rather than a discrete implementation.
+It utilizes the same underlying hardware feature and identical dot-product mathematics, but introduces a separate control lane that artists and gameplay systems
+can drive independently. While the framework presented in this document serves as an extension, it is possible to construct a fully standalone implementation as well.
 
-Before diving into the engine souce code to integrate this extension, a close examination of how graphics hardwares nativelly processes clipping boundaries under the hood is required. 
+Before diving into the engine source code to integrate this extension, a close examination of how graphics hardware natively processes clipping boundaries under the hood is required.
 
 <br></br>
 
-<BeforeAfter 
-  imageBefore='/blog/implementing-per-object-clip-planes/Image_Box_NotClipped.jpg' 
+<BeforeAfter
+  imageBefore='/blog/implementing-per-object-clip-planes/Image_Box_NotClipped.jpg'
   imageAfter='/blog/implementing-per-object-clip-planes/Image_Box_Clipped.jpg'
 />
 
 
 ## Clip Planes and Where to Find Them
 
-In computer graphics, rendering hardware relies on a dedicated set of distances to determine whether a vertex should be preserved or clipped.
-Rather than executing software-side culling algorithms, modern graphics APIs (such as DirectX, Vulkan, and OpenGL) natively 
-expose specialized hardware registers allocated for these clip distances, typically supporting a minimum of six to eight simultaneously.
+In computer graphics, rendering hardware relies on a dedicated set of distances to determine whether geometry should be preserved or clipped.
+Rather than executing software-side culling algorithms, modern graphics APIs (such as DirectX, Vulkan, and OpenGL) natively
+expose specialized hardware slots allocated for these clip distances, typically supporting a minimum of six to eight simultaneously.
 
-During the vertex processing stage of the rendering pipeline, the hardware evaluates these distance values.
-If a vertex yields a negative clip distance, the hardware rasterizer clips the primitive along this boundary, cleanly discarding non-visible
-fragments before they ever reach the pixel shader. Essentially, the hardware monitors each active clip distance slot and discards the vertex
-if even a single distance value falls below zero.
+During the vertex processing stage of the rendering pipeline, the vertex shader writes a distance value into each active slot, and the hardware evaluates them.
+If a vertex yields a negative clip distance, the hardware rasterizer clips the primitive along the boundary where the interpolated distance crosses zero, cleanly discarding non-visible
+fragments before they ever reach the pixel shader. Essentially, the hardware monitors each active clip distance slot and discards a region of a triangle
+if even a single distance value falls below zero there.
 
 Generally, developers use a plane equation to derive this clip distance value. An arbitrary plane is defined, and the clip distance
 is calculated as the signed distance from the vertex to that plane. If the vertex lies in the positive half-space—the side the plane
 normal points toward—the distance value is positive and the geometry is preserved. Conversely, if it lies on the opposite side, the distance
-value becomes negative, triggering the hardware to clip the vertex.
+value becomes negative, triggering the hardware to clip the geometry.
 
 <MathBlock
   latex="Clip Distance = SignedDistanceToPlane(Q)"
-  caption="Setting the clip distnace to the distance of point Q to a plane"
+  caption="Setting the clip distance to the signed distance of point Q to a plane"
   size="large"
 />
 
 Because using a plane equation to derive these values is the industry-standard approach, this hardware feature is universally referred to as "clip planes."
 
-Out of the box, Unreal Engine supports a global clip plane feature. When enabled, the engine evaluates every vertex against a single 
-plane defined on a per-camera basis to derive its clip distance. The term "global" reflects the fact that this
+Out of the box, Unreal Engine supports a global clip plane feature. When enabled, the engine evaluates every vertex against a single
+plane defined on a per-camera basis to derive its clip distance, and writes the result into the first clip distance slot. The term "global" reflects the fact that this
 boundary applies uniformly to every object rendered by that specific camera—though different cameras can maintain entirely distinct
 global clip planes.
 
-The objective of this implementation is to extend this capability to a per-object basis. By utilizing the exact same
-underlying hardware mechanics, but define the clip plane dynamically per-primitive so that individual objects can maintain
-their own unique cutting boundaries.Because modern graphics APIs support multiple concurrent clip distances, assigning the Per-Object Clip Plane to a dedicated hardware slot ensures seamless coexistence with the native global clip plane.
+The objective of this implementation is to extend this capability to a per-object basis: utilizing the exact same
+underlying hardware mechanics, but defining the clip plane per primitive so that individual objects can maintain
+their own unique cutting boundaries. Because modern graphics APIs support multiple concurrent clip distances, assigning the Per-Object Clip Plane to a dedicated hardware slot
+ensures seamless coexistence with the native global clip plane: water reflections retain their camera-driven plane, while individual objects can carry their own.
 
-Before diving into the implementation it is important to understand how the clip planes are 
-represented and the signed distance is calculated.
+Before diving into the implementation, it is important to understand how clip planes are
+represented and how the signed distance is calculated.
 
 ### Compact Plane Representation
 
@@ -88,13 +81,12 @@ Where $\vec{N}$ is the surface normal vector of the plane and $\vec{P}_0$ is an 
 </p>
 
 
-Evaluating this formulation indicates taht representing a 3D plane in world space requires two <CodeInline>FVector3f</CodeInline>s; 
-one for the plane normal ($\vec{N}$) and another for the surface point ($\vec{P}$).
+Evaluating this formulation indicates that representing a 3D plane in world space requires two <CodeInline>FVector3f</CodeInline>s:
+one for the plane normal ($\vec{N}$) and another for the surface point ($\vec{P}_0$).
 
 
 <CodeBlock
   code={`
-
 struct FMyPlane
 {
     FVector3f PlaneNormal;
@@ -104,36 +96,35 @@ struct FMyPlane
   filename=""
 />
 
-However, it is totally possible to reduce the memory footprint of a plane by representing it in much more compact form. This special form requires
-the surface point $\vec{P}_0$ to be selected as the following.
+However, it is entirely possible to reduce the memory footprint of a plane by representing it in a much more compact form. This special form requires
+the surface point $\vec{P}_0$ to be selected as follows:
 
 <MathBlock
-  latex="\vec{P}_0 = D_p * \vec{N}"
+  latex="\vec{P}_0 = D_P \cdot \vec{N}"
   caption=""
   size="large"
 />
 
-Geometrically, this approach defines $\vec{P_0}$ as the intersection point in between plane normal $\vec{N}$ and the plane surface.
+Geometrically, this approach defines $\vec{P}_0$ as the intersection point between the plane surface and the line that passes through the world origin along the plane normal $\vec{N}$.
 
 <p align="center">
   <img src="/blog/implementing-per-object-clip-planes/Image_Plane_WithWorldOrigin.svg" alt="PlaneWithWorldOrigin"></img>
 </p>
 
-Under this conditions, a plane can be represented by the plane normal $\vec{N}$ and the plane distance $D_p$ to represent a plane which, can fit into an
-<CodeInline>FVector4f</CodeInline> whose first three elements $(X, Y, Z)$ storing the plane normal and storing $D_p$ as the last element ($W$).
+Under these conditions, a plane can be represented by the plane normal $\vec{N}$ and the plane distance $D_P$ alone, which fits into a single
+<CodeInline>FVector4f</CodeInline>: the first three elements $(X, Y, Z)$ store the plane normal and the last element ($W$) stores $D_P$.
 
- <CodeBlock
+<CodeBlock
   code={`
-
 struct FMyCompactPlane
 {
-    FVector4f Plane;
+    FVector4f Plane; // XYZ: plane normal, W: plane distance
 };
 `}
   filename=""
 />
 
-This compact representation reduces the memory footprint of each plane by two floating-point values—a 33% reduction in memory overhead per instance. Furthermore, storing the plane in a single 4D vector enables GPU-friendly dot-product instructions during distance evaluation.
+This compact representation reduces the memory footprint of each plane by two floating-point values—a 33% reduction in memory overhead per instance. Furthermore, storing the plane in a single 4D vector enables GPU-friendly dot-product instructions during distance evaluation, as the next section shows.
 
 ### Evaluating Point-Plane Distance (The Magic Dot Product)
 
@@ -150,15 +141,13 @@ To establish this calculation within the rendering pipeline, the core variables 
 
 The shortest distance from an arbitrary point to a plane is always measured along a path perpendicular to that plane. Because the plane normal $\vec{N}$ is by definition perpendicular
 to the surface, $D_Q$ can be computed by projecting the query point $\vec{Q}$ onto the plane
-normal. The difference between this projected distance and the plane's own distance from 
+normal. The difference between this projected distance and the plane's own distance from
 the origin ($D_P$) yields the exact signed distance $D_Q$.
-
 
 The geometric interpretation is illustrated below:
 
-
 <p align="center">
-  <img src="/blog/implementing-per-object-clip-planes/Image_Plane_Distance.svg" alt="Plane"></img>
+  <img src="/blog/implementing-per-object-clip-planes/Image_Plane_Distance.svg" alt="Plane Distance"></img>
 </p>
 
 Therefore, the relationship can be expressed as:
@@ -174,67 +163,79 @@ By expanding and slightly rearranging this equation, a magnificent algebraic sho
 <MathBlock
   latex="\begin{align*}
          D_Q &= \vec{Q} \cdot \vec{N} - D_P \\
-         D_Q &= Q_X * N_X + Q_Y * N_Y + Q_Z * N_Z - D_P * 1 \\
-         D_Q &= <N_X, N_Y, N_Z, -D_P> \cdot <Q_X, Q_Y, Q_Z, 1> 
+         D_Q &= Q_X N_X + Q_Y N_Y + Q_Z N_Z - D_P \cdot 1 \\
+         D_Q &= \langle N_X, N_Y, N_Z, -D_P \rangle \cdot \langle Q_X, Q_Y, Q_Z, 1 \rangle
          \end{align*}"
   caption=""
   size="large"
 />
 
 
-Notice that the left-hand operand is almost identical to previously discussed 4D 
-vector representation of the plane, with the minor exception that the distance 
-term $D_P$ is negated. The right-hand operand is simply the query point represented 
-as a homogeneous 4D coordinate, obtained by appending $1$ as its $W$ component. 
-Evaluating the dot product of these two 4D vectors directly yields the signed clip 
+Notice that the left-hand operand is almost identical to the previously discussed 4D
+vector representation of the plane, with the minor exception that the distance
+term $D_P$ is negated. The right-hand operand is simply the query point represented
+as a homogeneous 4D coordinate, obtained by appending $1$ as its $W$ component.
+Evaluating the dot product of these two 4D vectors directly yields the signed clip
 distance of $\vec{Q}$.
 
-This means that if the $D_p$ term is negated while representing the clip plane, then calculating 
-the distance of point $\vec{Q}$ from the clip plane is as trivial as evaluating the dot product of the plane and the point 
-represented as a homogeneous 4D coordinate.
+This means that if the $D_P$ term is stored negated, calculating
+the distance of point $\vec{Q}$ from the clip plane is as trivial as evaluating a single dot product between the plane and the point
+represented as a homogeneous 4D coordinate. This is exactly the convention used throughout the rest of this implementation: whenever the plane is packed
+into a 4D vector, its $W$ component holds $-D_P$.
 
 ## Implementation Blueprint
-Bridging the gap between gameplay logic and raw hardware clipping requires establishing a unified, sequential data pipeline that spans all the way from a primitive component down to the HLSL vertex shaders. A top-down approach is used to trace the data's journey sequentially through Unreal Engine's architectural layers. Along this path, the primary objective is to safely ferry parameters across the asynchronous Game Thread and Render Thread boundary without inviting thread race conditions or memory corruption, before neatly packing them across the CPU-to-GPU memory interface.
+Bridging the gap between gameplay logic and raw hardware clipping requires establishing a unified, sequential data pipeline that spans all the way from a primitive component down to the HLSL vertex shaders.
+A top-down approach is used to trace the data's journey sequentially through Unreal Engine's architectural layers. Along this path, the primary objective is to safely ferry parameters across the
+asynchronous Game Thread and Render Thread boundary without inviting race conditions or memory corruption, before neatly packing them across the CPU-to-GPU memory interface.
 
 
 <p align="center">
-  <img src="/blog/implementing-per-object-clip-planes/Image_ToDo.svg" alt="Plane"></img>
+  <img src="/blog/implementing-per-object-clip-planes/Image_ToDo.svg" alt="Implementation Blueprint"></img>
 </p>
 
+The journey is split into the following stages, each of which gets its own section below:
 
-## Extenting Primitive Component
+1. **Defining the required variables on primitive components** (Game Thread).
+2. **Carrying the information to scene proxies** (Game Thread → Render Thread).
+3. **Modifying the uniform buffers** so they have room to carry the information to the GPU (Render Thread).
+4. **Modifying the uniform buffer encoding and decoding** so that the CPU and the GPU agree on where the data lives (Render Thread → GPU).
+5. **Updating the vertex shaders** to write the per-object clip distance (GPU).
 
-Needless to say primitive component are one of the core objects of the Unreal Engine's game world. It defines a base class for all components 
-that possesses a visual representation or physical volume in the game world. Therefore, <CodeInline>UPrimitiveComponent</CodeInline> class is selected to be the base class to insert the Per-Object Clip plane implementation to it.
 
-Primitive components plays the role of the starting point in this implementation. It defines the necessary variables to define a clip plane, which is used to derive 
+## Extending the Primitive Component
+
+Needless to say, primitive components are one of the core objects of Unreal Engine's game world. <CodeInline>UPrimitiveComponent</CodeInline> is the base class for all components
+that possess a visual representation or physical volume in the game world. Therefore, it is selected as the class to host the Per-Object Clip Plane implementation.
+
+Primitive components play the role of the starting point in this implementation. They define the variables that describe the clip plane, which is later used to derive
 the clipping boundaries for the object.
 
-Per-Object Clip Plane feature is defined in per-object basis and it is not required to have it enabled on every primitive
-component in the scene, it is required to define a boolean flag parameter, in addition to the plane itself, indicating whether the clip plane is enabled for that primitive or not.
+Since the Per-Object Clip Plane feature is defined on a per-object basis and is not required to be enabled on every primitive
+component in the scene, a boolean flag indicating whether the clip plane is enabled for that primitive is required in addition to the plane itself.
 
-With the current setup, the variables to defines are the following
+With the current setup, the variables to define are the following:
 
 * A boolean flag indicating whether the component has an active per-object clip plane.
 
-* A <CodeInline>FVector3f</CodeInline> representing the surface normal vector of the clip plane in world space.
+* An <CodeInline>FVector</CodeInline> representing the surface normal vector of the clip plane in world space.
 
 * A floating-point value representing the signed perpendicular distance of the clip plane from the world origin.
 
+Notice that on the component side the plane is stored in its human-friendly form (a normal and a distance). Converting it into the compact, negated form is done later, when the data leaves the component.
+
 <Notification>
-<CodeInline>//...</CodeInline> and other <CodeInline>...</CodeInline> notations are used to denote omitted code, that is not relevant 
+<CodeInline>//...</CodeInline> and other <CodeInline>...</CodeInline> notations are used to denote omitted code that is not relevant
 to the functionality being described.
 </Notification>
 
 <CodeBlock
   code={`
-
 class UPrimitiveComponent : public USceneComponent ....
 {
     //...
     /*
     * Set to true if this primitive has a custom clip plane.
-    * r.Allow.GlobalClipPlane must be true to use this feature
+    * r.AllowGlobalClipPlane must be true to use this feature
     */
     UPROPERTY(EditAnywhere, Category=Rendering)
     bool bPerObjectClipPlaneEnabled = false;
@@ -244,7 +245,7 @@ class UPrimitiveComponent : public USceneComponent ....
     * bPerObjectClipPlaneEnabled should be true to edit this value.
     */
     UPROPERTY(EditAnywhere, Category=Rendering, meta=(EditCondition="bPerObjectClipPlaneEnabled"))
-    FVector PerObjectClipPlaneNormal = FVector::ZeroVector;
+    FVector PerObjectClipPlaneNormal = FVector::UpVector;
 
     /*
     * The offset of the clipping plane from the world center (0, 0, 0)
@@ -258,38 +259,37 @@ class UPrimitiveComponent : public USceneComponent ....
   filename="PrimitiveComponent.h"
 />
 
-Properties are not that handy if they cannot be modified at runtime by an external code.
-The most straightforward way is to define a set of getters and setters.
+Properties are not that handy if they cannot be modified at runtime by external code.
+The most straightforward way is to define a set of getters and setters, exposed to Blueprints as well.
 
 <CodeBlock
   code={`
-
 //PrimitiveComponent.h
 class UPrimitiveComponent : public USceneComponent ....
 {
     //...
-    /** Sets bPerObjectClipPlaneEnabled property and marks the render state dirty */
+    /** Sets bPerObjectClipPlaneEnabled property and updates the scene proxy */
     UFUNCTION(BlueprintCallable, Category = "Rendering")
     ENGINE_API void SetPerObjectClipPlaneEnabled(bool bValue);
 
     /**
-    * Sets PerObjectPlaneNormal and PerObjectPlaneDistance properties and
-    * marks the render state dirty.
+    * Sets PerObjectClipPlaneNormal and PerObjectClipPlaneDistance properties and
+    * updates the scene proxy.
     */
     UFUNCTION(BlueprintCallable, Category = "Rendering")
     ENGINE_API void SetPerObjectClipPlane(const FVector& PlaneNormal, float PlaneDistance);
 
     UFUNCTION(BlueprintCallable, Category = "Rendering")
-    ENGINE_API bool GetPerObjectClipPlaneEnabled() const
+    bool GetPerObjectClipPlaneEnabled() const
     {
-      return bPerObjectClipPlaneEnabled;
+        return bPerObjectClipPlaneEnabled;
     }
-    
+
     UFUNCTION(BlueprintCallable, Category = "Rendering")
-    ENGINE_API void GetPerObjectClipPlane(FVector& PlaneNormal, float& PlaneDistance) const
+    void GetPerObjectClipPlane(FVector& PlaneNormal, float& PlaneDistance) const
     {
-      PlaneNormal = PerObjectClipPlaneNormal;
-      PlaneDistance = PerObjectClipPlaneDistance;
+        PlaneNormal = PerObjectClipPlaneNormal;
+        PlaneDistance = PerObjectClipPlaneDistance;
     }
     //...
 }
@@ -309,135 +309,131 @@ void UPrimitiveComponent::SetPerObjectClipPlane(const FVector& PlaneNormal, floa
   filename=""
 />
 
+For now the setters only store the new values. They are going to be revisited once the scene proxy is able to receive runtime updates.
+
 ## Scene Proxies
 
 In Unreal Engine, gameplay logic is executed on the Game Thread (GT), while rendering operations—such as updating vertex buffers and managing textures—occur asynchronously on the Render Thread (RT).
 To safely handle this multi-threaded split, the engine creates mirrored representation objects on the render thread for components living on the game thread.
-These objects are known as Scene Proxies. 
+These objects are known as Scene Proxies.
 
-Different game object types can be represented by distinct proxy classes. For instance, an <CodeInline>UPrimitiveComponent</CodeInline> is represented by a 
-<CodeInline>FPrimitiveSceneProxy</CodeInline>, whereas an <CodeInline>USkyLightComponent</CodeInline> is 
+Different game object types can be represented by distinct proxy classes. For instance, a <CodeInline>UPrimitiveComponent</CodeInline> is represented by an
+<CodeInline>FPrimitiveSceneProxy</CodeInline>, whereas a <CodeInline>USkyLightComponent</CodeInline> is
 represented by a proxy of type <CodeInline>FSkyLightSceneProxy</CodeInline>. Each proxy stores only the rendering-specific data required by the GPU and has no direct access to the source component's state or logic.
 
 <Notification>
-The same pattern is preserved with game thread - physics context, but with physics proxies
+The same pattern is preserved between the game thread and the physics context, but with physics proxies
 instead.
 </Notification>
 
 Although data can flow in either direction, information typically moves from the source component to the proxy.
-The core challange of having a mirror object to live on another thread is keeping them synchornized as the game state changes.
-Before diving down how synchronization is performed it is required to extent the <CodeInline>FPrimitiveSceneProxy</CodeInline> so that it can have the variables to be synchronized in the first place.
+The core challenge of having a mirror object living on another thread is keeping the two synchronized as the game state changes.
+Before diving into how synchronization is performed, <CodeInline>FPrimitiveSceneProxy</CodeInline> has to be extended so that it holds the variables to be synchronized in the first place.
 
 <CodeBlock
   code={`
-//Header file
-struct FPrimitiveSceneProxy
+class FPrimitiveSceneProxy
 {
-  //...
-  /** Enable per object clip plane on this object, it is not used if r.Allow.GlobalClipPlane is not enabled.*/
-  uint8 bPerObjectClipPlaneEnabled : 1;
- 
-        
-  /**
-  * Per object clip plane defined in global space
-  * (x,y,z) represents the plane normal in world space (normalized)
-  * w represents the distance of the plane from the world origin. It's negated.
-  */
-  FVector4 PerObjectClipPlane;
- 
-}
+    //...
+    /** Enable per object clip plane on this object, it is not used if r.AllowGlobalClipPlane is not enabled.*/
+    uint8 bPerObjectClipPlaneEnabled : 1;
 
+    /**
+    * Per object clip plane defined in world space
+    * (x,y,z) represents the plane normal in world space (normalized)
+    * w represents the distance of the plane from the world origin. It's negated.
+    */
+    FVector4 PerObjectClipPlane;
+    //...
+}
 `}
-  filename=""
+  filename="PrimitiveSceneProxy.h"
 />
 
-Engine utilizes an event-driven system to provide component-proxy synchronization. Because thousands of component-proxy pairs may exist concurrently, polling or updating every proxy per frame would severely degrade frame rates. The system has three distinct mechanisms for proxy synchronization:
+The engine utilizes an event-driven system to provide component-proxy synchronization. Because thousands of component-proxy pairs may exist concurrently, polling or updating every proxy per frame would severely degrade frame rates. The system has three distinct mechanisms for proxy synchronization:
 
-1. Initialization on Creation: When a rendering-related component registers with the scene, its corresponding scene proxy is instantiated. During construction, 
+1. **Initialization on Creation:** When a rendering-related component registers with the scene, its corresponding scene proxy is instantiated. During construction,
    the proxy reads all relevant parameters from the source component, beginning its lifecycle in a synchronized state.
-2. In-Place Dynamic Updates: An existing scene proxy can be updated dynamically to reflect runtime changes made on its source component.
-   For example, modifying a component's Custom Primitive Data (CPD) floats triggers a targeted update that pushes only the modified values to the existing proxy.
-3. Recreation (Teardown and Rebuild): If an existing proxy cannot be modified in place to reflect a specific change, it is destroyed and completely recreated,
-   forcing full synchronization during construction. A prime example of this is toggling a light's shadow-casting property; 
+2. **Recreation (Teardown and Rebuild):** If an existing proxy cannot be modified in place to reflect a specific change, it is destroyed and completely recreated,
+   forcing full synchronization during construction. A prime example of this is toggling a light's shadow-casting property;
    because of cached lighting interactions with the scene, updating the active proxy dynamically is not supported. Instead, the engine tears down and rebuilds the proxy.
-   This recreation method is also the standard mechanism for applying structural changes made at edit time via the Details Panel, even if an in-place update pathway exists.
-   It is required to call <CodeInline>MarkRenderStateDirty</CodeInline> to tell the engine that current state of the proxy does no longer represents the contemporary rendering 
-   state of the source component, hence to recreate the existing proxy.
+   This recreation method is also the standard mechanism for applying changes made at edit time via the Details Panel, even if an in-place update pathway exists.
+   Calling <CodeInline>MarkRenderStateDirty</CodeInline> tells the engine that the current state of the proxy no longer represents the contemporary rendering
+   state of the source component, and hence that the existing proxy should be recreated.
+3. **In-Place Dynamic Updates:** An existing scene proxy can be updated dynamically to reflect runtime changes made on its source component.
+   For example, modifying a component's Custom Primitive Data (CPD) floats triggers a targeted update that pushes only the modified values to the existing proxy.
 
+All three paths have to be covered for the per-object clip plane to stay in sync, so let us go through them one by one.
 
 ### Initialization on Creation
 
-The pattern the engine follows here is to derive an intermediatery description of the component and use that object to create a scene proxy. The main reason of this indirect approach is to
-provide the ability to store a description to create a scene proxy later with or without the source component being presented at the time. 
+The pattern the engine follows here is to derive an intermediary description of the component and use that object to create a scene proxy. The main reason for this indirect approach is to
+provide the ability to store a description and create a scene proxy later, with or without the source component being present at that time.
 
-<Notification emoji="❔"> 
-To learn more see How Small Open Doors Can Lead to Better CPU Utilization and Bigger Games | Unreal Fest 2024 (https://www.youtube.com/watch?v=JaCf2Qmvy18)
+<Notification emoji="❔">
+To learn more, see *How Small Open Doors Can Lead to Better CPU Utilization and Bigger Games | Unreal Fest 2024* (https://www.youtube.com/watch?v=JaCf2Qmvy18)
 </Notification>
 
 <p align="center">
-  <img src="/blog/implementing-per-object-clip-planes/Image_ProxyCreation.svg" alt="Plane"></img>
+  <img src="/blog/implementing-per-object-clip-planes/Image_ProxyCreation.svg" alt="Proxy Creation"></img>
 </p>
 
 
-Think <CodeInline>FPrimitiveSceneProxyDesc</CodeInline> as a photocopy of the component made on the game thread: lightweight, immutable for the handoff, and safe to read when the render thread builds proxies. 
-We are going to extend the description first so clip-plane data crosses the thread boundary in the same pattern Unreal already uses for bounds, flags, and material relevance. And than these informations
-are going to be copied into the proxy.
+Think of <CodeInline>FPrimitiveSceneProxyDesc</CodeInline> as a photocopy of the component made on the game thread: lightweight, immutable for the handoff, and safe to read when the render thread builds proxies.
+We are going to extend the description first, so that clip-plane data crosses the thread boundary in the same pattern Unreal already uses for bounds, flags, and material relevance. Then this information
+is going to be copied into the proxy.
 
-
-Happy news is that the process is basic, new variables are going to be created in the description and then the information is going to be stored in those variables, hence carrying the information to the 
-description is going to be done.
+The happy news is that the process is simple: new variables are created in the description, and the component's values are stored in those variables. This is also the right place to convert
+the plane into its compact form with the negated distance.
 
 <CodeBlock
   code={`
-
 //Header file
 struct FPrimitiveSceneProxyDesc
 {
     FPrimitiveSceneProxyDesc()
     {
-      //... 
-      bPerObjectClipPlaneEnabled = false;
-      PerObjectClipPlane = FVector4(0.0f, 0.0f, 0.0f, 0.0f);
-      //...
+        //...
+        bPerObjectClipPlaneEnabled = false;
+        PerObjectClipPlane = FVector4(0.0f, 0.0f, 0.0f, 0.0f);
+        //...
     }
 
     //...
     uint32 bPerObjectClipPlaneEnabled : 1;
     FVector4 PerObjectClipPlane; //Notice the plane is stored in compact form.
     //...
-
 }
+
 //CPP file
 //Called by the engine to create a proxy description from a component.
 void FPrimitiveSceneProxyDesc::InitializeFromPrimitiveComponent(const UPrimitiveComponent* InComponent)
 {
     //...
 
-    //Store all the releated information into the desciption.
+    //Store all the related information into the description.
     bPerObjectClipPlaneEnabled = InComponent->GetPerObjectClipPlaneEnabled();
 
-    FVector InPerObjectClipPlane;
+    FVector InPerObjectClipPlaneNormal;
     float InPerObjectClipPlaneDistance;
 
-    InComponent->GetPerObjectClipPlane(InPerObjectClipPlane, InPerObjectClipPlaneDistance);
+    InComponent->GetPerObjectClipPlane(InPerObjectClipPlaneNormal, InPerObjectClipPlaneDistance);
 
-    PerObjectClipPlane = FVector4(InPerObjectClipPlane, -InPerObjectClipPlaneDistance);
+    // Normalize the normal and negate the distance so the shader can use a single dot product.
+    PerObjectClipPlane = FVector4(InPerObjectClipPlaneNormal.GetSafeNormal(), -InPerObjectClipPlaneDistance);
 }
-
 `}
-  filename=""
+  filename="PrimitiveSceneProxyDesc.h / .cpp"
 />
 
-Once the description arrives on the render thread, <CodeInline>FPrimitiveSceneProxy</CodeInline> becomes the long-lived "shadow" of the component—still on the CPU, but owned by rendering. 
-The proxy constructor simply mirrors what we already packed into the desc; from here on, render-thread code reads clip-plane state from the proxy, not from the live component.
+Once the description arrives on the render thread, <CodeInline>FPrimitiveSceneProxy</CodeInline> becomes the long-lived "shadow" of the component—still on the CPU, but owned by rendering.
+From here on, render-thread code reads clip-plane state from the proxy, not from the live component.
 
-All the information passed into the description are used to reconstruct the state of the source component within the render thread. The process is required to be changed in order to reconstruct 
-the source objects clippling state as well. The primitive scene proxy component constructor with the <CodeInline>FPrimitiveSceneProxy::FPrimitiveSceneProxy(const FPrimitiveSceneProxyDesc& InProxyDesc)</CodeInline>
-signature is used for that purpose. Our aim is going to be that constructor.
+All the information passed into the description is used to reconstruct the state of the source component within the render thread, so this process has to be changed to reconstruct
+the source object's clipping state as well. The primitive scene proxy constructor with the <CodeInline>FPrimitiveSceneProxy::FPrimitiveSceneProxy(const FPrimitiveSceneProxyDesc& InProxyDesc)</CodeInline>
+signature is used for that purpose, so that constructor is our target.
 
-The only thing to be done is simply copying the values from the description to the already defined mirror variables.
-
-<br></br>
+The only thing to be done is copying the values from the description to the already defined mirror variables.
 
 <CodeBlock
   code={`
@@ -445,40 +441,38 @@ FPrimitiveSceneProxy::FPrimitiveSceneProxy(const FPrimitiveSceneProxyDesc& InPro
 {
     //...
     bPerObjectClipPlaneEnabled = InProxyDesc.bPerObjectClipPlaneEnabled;
-	  PerObjectClipPlane = InProxyDesc.PerObjectClipPlane;
+    PerObjectClipPlane = InProxyDesc.PerObjectClipPlane;
 }
-
 `}
-  filename=""
+  filename="PrimitiveSceneProxy.cpp"
 />
 
-With all being done now the engine carries the per-object clip plane information all the way to the scene proxy when it is created. But that is not enough since it is only one of the three possible paths.
-We need to cover other two as well.
+With that done, the engine carries the per-object clip plane information all the way to the scene proxy when it is created. But that is not enough, since it is only one of the three possible paths.
+The other two have to be covered as well.
 
 
 ### Recreation (Teardown and Rebuild)
 
-It is more convenient to cover teardown path since it is closely releated to synchronization through recreation of the proxy. This path generally taken by the engine when 
-it is not possible to update the state of the proxy to synchonize it with the source component. The reason can vary but the common part is that the engine cannot decide that by itself.
-It has to be notified about the situation. This is when <CodeInline>MarkRenderStateDirty</CodeInline> function becomes handy. 
+It is more convenient to cover the teardown path next, since it reuses the creation path we have just implemented. This path is generally taken by the engine when
+it is not possible to update the state of the proxy in place. The reasons can vary, but the common part is that the engine cannot detect the situation by itself;
+it has to be notified. This is when the <CodeInline>MarkRenderStateDirty</CodeInline> function becomes handy.
 
-It is enough to call <CodeInline>MarkRenderStateDirty</CodeInline> when we want to force teardown. Since our implementation has no properties that can only be updated during creation therefore 
-we are only required to teadown existing scene proxyies when a per-object clip plane property gets changed through details panel. 
+Calling <CodeInline>MarkRenderStateDirty</CodeInline> is enough to force a teardown. Since our implementation has no properties that can only be updated during creation,
+we are only required to tear down existing scene proxies when a per-object clip plane property gets changed through the Details Panel.
 
-
-<CodeInline>UPrimitiveComponent::PostEditChangeProperty(FPropertyChangedEvent& )</CodeInline> function gets called by the editor when a property gets changed via details panel
-while in the editor. It is possible to detect changes on per-object clip plane parameters in that function. In fact the editor does the same. Inspect the following
+<CodeInline>UPrimitiveComponent::PostEditChangeProperty(FPropertyChangedEvent&)</CodeInline> is called by the editor when a property gets changed via the Details Panel.
+It is possible to detect changes to the per-object clip plane parameters in that function. In fact, the engine already does the same for its own properties. Inspect the following:
 
 <CodeBlock
   code={`
 #if WITH_EDITOR // Editor only functionality
-void UPrimitiveComponent::PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent) 
+void UPrimitiveComponent::PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent)
 {
     //...
     // we need to reregister the primitive if the min draw distance changed to propagate the change to the rendering thread
     if (PropertyName == GET_MEMBER_NAME_CHECKED(UPrimitiveComponent, MinDrawDistance))
     {
-        MarkRenderStateDirty(); // This is how the source code does already.
+        MarkRenderStateDirty(); // This is how the source code already does it.
     }
     //...
 }
@@ -487,21 +481,20 @@ void UPrimitiveComponent::PostEditChangeProperty(FPropertyChangedEvent& Property
   filename="PrimitiveComponent.cpp"
 />
 
-In the example above the component listens those changes and tells the engine to reacreate the proxy if the changed property is <CodeInline>MinDrawDistance</CodeInline>.
+In the example above, the component listens for property changes and tells the engine to recreate the proxy if the changed property is <CodeInline>MinDrawDistance</CodeInline>.
 
-We are going to do the same by adding an if statement checking whether any of per-object clip plane related properties are changed, before invalidating the current render state hence forcing
+We are going to do the same by adding an if statement that checks whether any of the per-object clip plane related properties have changed, and invalidating the current render state, forcing
 the engine to recreate the scene proxy.
 
 <CodeBlock
   code={`
-
-void UPrimitiveComponent::PostEditChangeProperty(...)
+void UPrimitiveComponent::PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent)
 {
     //...
     // Primitive uniform buffer should be updated, therefore mark the render state as dirty once any of the
-	  // properties related to per object clip plane get changed.
-	  if (PropertyName == GET_MEMBER_NAME_CHECKED(UPrimitiveComponent, bPerObjectClipPlaneEnabled) ||
-	      PropertyName == GET_MEMBER_NAME_CHECKED(UPrimitiveComponent, PerObjectClipPlaneNormal) ||
+    // properties related to per object clip plane get changed.
+    if (PropertyName == GET_MEMBER_NAME_CHECKED(UPrimitiveComponent, bPerObjectClipPlaneEnabled) ||
+        PropertyName == GET_MEMBER_NAME_CHECKED(UPrimitiveComponent, PerObjectClipPlaneNormal) ||
         PropertyName == GET_MEMBER_NAME_CHECKED(UPrimitiveComponent, PerObjectClipPlaneDistance))
     {
         MarkRenderStateDirty();
@@ -512,149 +505,174 @@ void UPrimitiveComponent::PostEditChangeProperty(...)
   filename="PrimitiveComponent.cpp"
 />
 
-It is now ensured that whenever a primitive scene component gets created or one of our per-object clip plane parameters are changed in the editor time the engine creates or recreates the scene
-proxy of the component.  
+It is now ensured that whenever a primitive component gets created, or one of our per-object clip plane parameters is changed at edit time, the engine creates or recreates the scene
+proxy of the component.
 
 ### In-Place Dynamic Updates
 
-Even though recreation option always ensures the synchronization, it is generally not preferred to synchronise a primitive proxy with its source component during runtime. Creating 
-a scene proxy is a non-trivial operation and generally has some performance effects. For example when a light proxy gets created the engine calculates and caches its interaction with the game scene 
-which requires some degree of random memory access. 
+Even though the recreation option always ensures synchronization, it is generally not the preferred way to synchronize a proxy with its source component at runtime. Creating
+a scene proxy is a non-trivial operation and comes with a performance cost. For example, when a light proxy gets created, the engine calculates and caches its interactions with the scene,
+which requires a fair amount of random memory access.
 
-To evade from that cost the general pattern is to provide functions to update scene proxies in place. External code and the source component can use those functions to synchronize the component 
-and the proxy. 
-But there is a danger along the way, race conditions. 
+To avoid that cost, the general pattern is to provide functions that update scene proxies in place. External code and the source component can use those functions to synchronize the component
+and the proxy. But there is a danger along the way: race conditions.
 
 <Notification>
-A race condition occurs when two or more processes or threads access and modify 
-the same data at the same time, and the final result depends on the order in which 
+A race condition occurs when two or more processes or threads access and modify
+the same data at the same time, and the final result depends on the order in which
 they run. Without proper coordination, this can lead to incorrect or unpredictable results.
 </Notification>
 
-Since scene proxies lives in the render thread, any mutation from other threads must be managed carefully to prevent any race conditions.
-It is a widely used pattern to define different versions of the same function for each relevant thread, the do the same thing safely at the end with the thread information
-is given implicitly.That is what we are going to do here as well. We are going to define <CodeInline>SetPerObjectClipPlaneEnabled</CodeInline>
-and <CodeInline>SetPerObjectClipPlane</CodeInline> functions to set the <CodeInline>bPerObjectClipPlaneEnabled</CodeInline> and <CodeInline>PerObjectClipPlane</CodeInline>
-respectfully for the render and game thread. These functions are going to be named as
+Since scene proxies live on the render thread, any mutation coming from other threads must be managed carefully to prevent race conditions.
+A widely used pattern is to define a separate version of the same function for each relevant thread; all versions end up doing the same thing, but each one does it safely for the thread
+it is called from. That is what we are going to do here as well. We are going to define <CodeInline>SetPerObjectClipPlaneEnabled</CodeInline>
+and <CodeInline>SetPerObjectClipPlane</CodeInline> functions that set <CodeInline>bPerObjectClipPlaneEnabled</CodeInline> and <CodeInline>PerObjectClipPlane</CodeInline>
+respectively, for both the render and the game thread:
 
-* <CodeInline>SetPerObjectClipPlaneEnabled_GameThread</CodeInline> : Sets the <CodeInline>bPerObjectClipPlaneEnabled</CodeInline> variable, to be called within the game thread.
-* <CodeInline>SetPerObjectClipPlaneEnabled_RenderThread</CodeInline> : Sets the <CodeInline>bPerObjectClipPlaneEnabled</CodeInline> variable, to be called within the render thread.
-* <CodeInline>SetPerObjectClipPlane_GameThread</CodeInline> : Sets the <CodeInline>PerObjectClipPlane</CodeInline> variable, to be called within the game thread.
-* <CodeInline>SetPerObjectClipPlane_RenderThread</CodeInline> : Sets the <CodeInline>PerObjectClipPlane</CodeInline> variable, to be called within the render thread.
+* <CodeInline>SetPerObjectClipPlaneEnabled_GameThread</CodeInline>: Sets the <CodeInline>bPerObjectClipPlaneEnabled</CodeInline> variable, to be called from the game thread.
+* <CodeInline>SetPerObjectClipPlaneEnabled_RenderThread</CodeInline>: Sets the <CodeInline>bPerObjectClipPlaneEnabled</CodeInline> variable, to be called from the render thread.
+* <CodeInline>SetPerObjectClipPlane_GameThread</CodeInline>: Sets the <CodeInline>PerObjectClipPlane</CodeInline> variable, to be called from the game thread.
+* <CodeInline>SetPerObjectClipPlane_RenderThread</CodeInline>: Sets the <CodeInline>PerObjectClipPlane</CodeInline> variable, to be called from the render thread.
 
-First let us define the render thread versions of the functions since they are simpler.
+Let us define the render thread versions of the functions first, since they are simpler.
 
 <CodeBlock
   code={`
 //Header file
-struct FPrimitiveSceneProxy
+class FPrimitiveSceneProxy
 {
     //...
     /*
     * Set per object clip plane enabled flag (RENDER THREAD)
     *
-    * @param the new value
+    * @param bEnabled the new value
     */
     void SetPerObjectClipPlaneEnabled_RenderThread(bool bEnabled);
 
     /**
     * Set per object clip plane
-    * x,y, and z is used to define the normal vector of the plane
-    * in world space where the last value w is used to define the distance
+    * x, y, and z define the normal vector of the plane
+    * in world space, while w holds the negated distance
     * of the plane from the world origin (0, 0, 0)
     *
     * (RENDER THREAD)
-    * 
-    * @param ClipPlane 
+    *
+    * @param ClipPlane
     */
     void SetPerObjectClipPlane_RenderThread(const FVector4& ClipPlane);
+
+private:
+    /** Flags the primitive so that its GPU representation gets rebuilt and re-uploaded (RENDER THREAD) */
+    void RequestPrimitiveUniformBufferUpdate();
 }
 
 //CPP file
 void FPrimitiveSceneProxy::SetPerObjectClipPlaneEnabled_RenderThread(bool bEnabled)
 {
     //To ensure that this function is called within the render thread
-    check(IsInRenderingThread())
+    check(IsInRenderingThread());
 
     bPerObjectClipPlaneEnabled = bEnabled;
+    RequestPrimitiveUniformBufferUpdate();
 }
 
 void FPrimitiveSceneProxy::SetPerObjectClipPlane_RenderThread(const FVector4& ClipPlane)
 {
     //To ensure that this function is called within the render thread
-    check(IsInRenderingThread())
+    check(IsInRenderingThread());
 
     PerObjectClipPlane = ClipPlane;
+    RequestPrimitiveUniformBufferUpdate();
+}
+
+//Tells the scene that the GPU representation of this primitive is stale.
+void FPrimitiveSceneProxy::RequestPrimitiveUniformBufferUpdate()
+{
+    if (FPrimitiveSceneInfo* SceneInfo = GetPrimitiveSceneInfo())
+    {
+        GetScene().RequestUniformBufferUpdate(*SceneInfo);
+    }
 }
 `}
-  filename=""
+  filename="PrimitiveSceneProxy.h / .cpp"
 />
 
-These functions basically checks whether the calling operation is made in the render thread first, and than mutates the variables. It is safe the change the value of the variables since
-these functions are designed to be called within the same thread as the scene proxy.
+These functions first check whether the call is made on the render thread, and then mutate the variables. It is safe to change the values since
+these functions are designed to be called on the same thread that owns the scene proxy.
 
-On the other hand game thread versions of the functions cannot perform a similar mutation. What we are going to do is to queue a render command which changes the value of the variables to be executed
-within the render thread. <CodeInline>ENQUEUE_RENDER_COMMAND</CodeInline> macro becomes handy here since it is designed to provide a way for developrs to enqueue render commands within threads other than
-render. These comamnds are then gets executed in the same order as they are queued at the start (not exactly, startish to be fair) of the render thread.
+Notice the extra <CodeInline>RequestPrimitiveUniformBufferUpdate</CodeInline> call. As we are going to see in the next chapter, the proxy is not what the GPU reads; the engine derives a
+GPU-side copy of it and only re-uploads that copy when it is told the primitive has changed. Mutating the proxy alone would leave the GPU with the old plane, so we explicitly flag the
+primitive for a uniform buffer update.
 
-Inspect the following definitions
+<Notification emoji="⚠️">
+The exact API used to flag a primitive for a GPU Scene update has moved around between engine versions. Check how the engine handles a similar
+runtime-updatable property (such as Custom Primitive Data) in your version and follow the same route.
+</Notification>
 
+On the other hand, the game thread versions of the functions cannot perform a similar direct mutation. What we are going to do instead is to queue a render command that changes the values of the variables
+on the render thread. The <CodeInline>ENQUEUE_RENDER_COMMAND</CodeInline> macro becomes handy here, since it is designed to let developers enqueue render commands from threads other than
+the render thread. These commands are then executed on the render thread in the same order they were queued.
+
+Inspect the following definitions:
 
 <CodeBlock
   code={`
 //Header file
-struct FPrimitiveSceneProxy
+class FPrimitiveSceneProxy
 {
-  //...
-  /*
-  * Set per object clip plane enabled flag
-  *
-  * @param the new value
-  */
-  void SetPerObjectClipPlaneEnabled_GameThread(bool bEnabled);
+    //...
+    /*
+    * Set per object clip plane enabled flag (GAME THREAD)
+    *
+    * @param bEnabled the new value
+    */
+    void SetPerObjectClipPlaneEnabled_GameThread(bool bEnabled);
 
-  /**
-  * Set per object clip plane
-  * x,y, and z is used to define the normal vector of the plane
-  * in world space where the last value w is used to define the distance
-  * of the plane from the world origin (0, 0, 0)
-  * 
-  * @param ClipPlane 
-  */
-  void SetPerObjectClipPlane_GameThread(const FVector4& ClipPlane);
-
+    /**
+    * Set per object clip plane
+    * x, y, and z define the normal vector of the plane
+    * in world space, while w holds the negated distance
+    * of the plane from the world origin (0, 0, 0)
+    *
+    * (GAME THREAD)
+    *
+    * @param ClipPlane
+    */
+    void SetPerObjectClipPlane_GameThread(const FVector4& ClipPlane);
 }
 
 //CPP file
 void FPrimitiveSceneProxy::SetPerObjectClipPlaneEnabled_GameThread(bool bEnabled)
 {
-  check(IsInGameThread())
+    check(IsInGameThread());
 
-  ENQUEUE_RENDER_COMMAND(FSetPerObjectClipPlaneEnabled)(
-  [this, bEnabled](FRHICommandList& RHICmdList)
-  {
-    this->SetPerObjectClipPlaneEnabled_RenderThread(bEnabled);	
-  });
+    ENQUEUE_RENDER_COMMAND(FSetPerObjectClipPlaneEnabled)(
+    [this, bEnabled](FRHICommandList& RHICmdList)
+    {
+        this->SetPerObjectClipPlaneEnabled_RenderThread(bEnabled);
+    });
 }
 
 void FPrimitiveSceneProxy::SetPerObjectClipPlane_GameThread(const FVector4& ClipPlane)
 {
-  check(IsInGameThread())
+    check(IsInGameThread());
 
-  ENQUEUE_RENDER_COMMAND(FSetPerObjectClipPlane)(
-  [this, ClipPlane](FRHICommandList& RHICmdList)
-  {
-    this->SetPerObjectClipPlane_RenderThread(ClipPlane);
-  });
+    ENQUEUE_RENDER_COMMAND(FSetPerObjectClipPlane)(
+    [this, ClipPlane](FRHICommandList& RHICmdList)
+    {
+        this->SetPerObjectClipPlane_RenderThread(ClipPlane);
+    });
 }
 `}
-  filename=""
+  filename="PrimitiveSceneProxy.h / .cpp"
 />
 
-In these functions we do not directly mutate the variables but rather copy the new values into the lamda and then write them into the variables in the render thread. 
-It it now possible the change the per-object clip plane state of a primitive scene proxy after its creation. 
+In these functions we do not mutate the variables directly; rather, we copy the new values into the lambda and write them into the variables on the render thread.
+It is now possible to change the per-object clip plane state of a primitive scene proxy after its creation.
 
-Let's use them when the source component gets changed at the runtime.
+Capturing <CodeInline>this</CodeInline> is safe here because the proxy is also destroyed through the render command queue, so any command enqueued before the destruction runs while the proxy is still alive.
+
+Let's use them when the source component gets changed at runtime.
 
 
 <CodeBlock
@@ -666,606 +684,501 @@ void UPrimitiveComponent::SetPerObjectClipPlaneEnabled(bool bValue)
     {
         bPerObjectClipPlaneEnabled = bValue;
 
-        if (SceneProxy) //<- Scene proxy of a component may not always be present, that is generally the case when the component is hidden. The source object is not being rendered afterall.
+        // Scene proxy of a component may not always be present, that is generally the case when the component is hidden
+        // or not registered. The source object is not being rendered after all.
+        if (SceneProxy)
         {
             SceneProxy->SetPerObjectClipPlaneEnabled_GameThread(bValue);
         }
-    } 
+    }
 }
 
 void UPrimitiveComponent::SetPerObjectClipPlane(const FVector& PlaneNormal, float PlaneDistance)
 {
-    const bool bShouldUpdate = bPerObjectClipPlaneEnabled && ( !PlaneNormal.Equals(PerObjectClipPlaneNormal) || !FMath::IsNearlyEqual(PlaneDistance, PerObjectClipPlaneDistance));
+    const bool bChanged = !PlaneNormal.Equals(PerObjectClipPlaneNormal) || !FMath::IsNearlyEqual(PlaneDistance, PerObjectClipPlaneDistance);
 
     PerObjectClipPlaneNormal = PlaneNormal;
     PerObjectClipPlaneDistance = PlaneDistance;
-    
-    if (bShouldUpdate && SceneProxy) //<- Since updating the proxy requires interthread communication it can be costly, we ensure that something worth notifiying happening before updating it.
+
+    // Since updating the proxy requires inter-thread communication it can be costly,
+    // we ensure that something worth notifying happened before updating it.
+    if (bChanged && SceneProxy)
+    {
         SceneProxy->SetPerObjectClipPlane_GameThread(FVector4(PerObjectClipPlaneNormal.GetSafeNormal(), -PerObjectClipPlaneDistance));
+    }
 }
 `}
-  filename=""
+  filename="PrimitiveComponent.cpp"
 />
 
+The plane is pushed to the proxy even while the feature is disabled on the component. Otherwise, a plane modified while disabled would never reach the proxy, and enabling the feature
+later would clip the object against a stale plane.
 
-## Setting Up The Uniform Buffers
 
-At this point primitive scene proxies are fully synchroinized to the per-object clip plane state of their source components.
-However, this information is not yet usefull; it resides entirely on the CPU and has not been sent out to the GPU, which is the next step of the implementation.
+## Sending the Data to the GPU
 
-Sending data to the GPU fundamentally different from updating a variable on an Actor or pushing data to the user interface for display.
-Having two disctinct physical memory components hence two different memory spaces makes it far more complex and error prone 
+At this point, primitive scene proxies are fully synchronized with the per-object clip plane state of their source components.
+However, this information is not yet useful; it resides entirely on the CPU and has not been sent out to the GPU, which is the next step of the implementation.
 
-While graphics APIs offer several ways to transfer data on the GPU, only one is relevant to this use case: uniform buffers.
+Sending data to the GPU is fundamentally different from updating a variable on an Actor or pushing data to the user interface for display.
+Having two distinct physical memory components, and hence two different memory spaces, makes it far more complex and error-prone.
 
-### What Is An Uniform Buffer
+While graphics APIs offer several ways to transfer data to the GPU, only one is relevant to this use case: uniform buffers.
 
-Uniform buffers are dedicated GPU memory regions that store data shared across a shader execution. They can be accessed by shader threads and generally contain information about the shader state, the object being rendered or the state of the computation. 
+### What Is a Uniform Buffer
 
-While shader cannot mutate a uniform buffer during execution, the CPU can update its contents prior to a draw call. It is usefull handy when applying the same shader to different object or different contexts. For instance when unreal compiles the shader out of a material it does not change or recompile it for every object insance that uses the same material. It only updates the uniform buffers dedicated to that shader with the information of the object being drawn.
+Uniform buffers are dedicated GPU memory regions that store data shared across a shader execution. They can be accessed by every shader thread and generally contain information about the shader state, the object being rendered, or the state of the computation.
 
-Because per-obeject clip plane parameters are a part of the objects render state and does not change depending on the vertex being computed or the pixel being drawn they are ideal candidates to put into an uniform buffer. 
+While a shader cannot mutate a uniform buffer during execution, the CPU can update its contents prior to a draw call. This is handy when applying the same shader to different objects or different contexts. For instance, when Unreal compiles a shader out of a material, it does not change or recompile it for every object instance that uses the same material. It only updates the uniform buffers dedicated to that shader with the information of the object being drawn.
 
-### The Implict Memory Contract
+Because per-object clip plane parameters are part of the object's render state, and do not change depending on the vertex being processed or the pixel being drawn, they are ideal candidates to put into a uniform buffer.
 
-Since uniform buffers are basically raw memory regions they can contain any type of information. This may not seem like an issue at first glance but since it can contain any information knowing the memory layout of the buffer becomes a problem. It is not possible to tell if an eight bits long uniform contains eight different boolean flags or an unsigned integer size of a byte by just looking at the raw memory in the buffer. Knowing the memory layout of the information beforehand is crucial, otherwise it would be playing lottery with the raw memory to get a meaningfull information out of it.
+### The Implicit Memory Contract
 
-An uniform buffer has to be read by following the rules of the memory layout just as the same layout as it is sent from the CPU. Even shifting a single bit would corrupt the whole buffer. Therefore it is safe to say that it requires a hidden contract in between CPU and GPU.
+Since uniform buffers are basically raw memory regions, they can contain any type of information. This may not seem like an issue at first glance, but precisely because they can contain anything, knowing the memory layout of the buffer becomes a problem. It is not possible to tell whether an eight-bit-long value contains eight different boolean flags or a single one-byte unsigned integer just by looking at the raw memory in the buffer. Knowing the memory layout of the information beforehand is crucial; otherwise, it would be like playing the lottery with raw memory to get meaningful information out of it.
+
+A uniform buffer has to be read following exactly the same memory layout it was written with on the CPU. Even shifting a single bit would corrupt the whole buffer. Therefore, it is safe to say that it requires a hidden contract between the CPU and the GPU.
 
 <p align="center">
-  <img src="/blog/implementing-per-object-clip-planes/Image_MemoryInterpretation.svg" alt="Plane"></img>
+  <img src="/blog/implementing-per-object-clip-planes/Image_MemoryInterpretation.svg" alt="Memory Interpretation"></img>
 </p>
 
-### Data Transmission To Uniform Buffers
+For instance, let's say the 13th <CodeInline>FVector4f</CodeInline> of a buffer contains the world location of a component in its first three elements. Then the GPU has to look at exactly that location
+to unpack the world location—not the 14th <CodeInline>FVector4f</CodeInline>, and not the last three elements of the 13th <CodeInline>FVector4f</CodeInline>.
 
-Unreal begins the process by scanning through the render scene to collect the rendering state of all relevant objects. 
-These states along with many other scene data then gets serialized into a stream of <CodeInline>FVector4f</CodeInline> elements.
-In this context, these elements serve as the fundamental raw memory units for Unreal Engine.This serialized stream is then pushed accorss CPU-GPU boundary. Upon receiving the data the GPU deserializes it to reconstruct the scene state on the GPU side.
+### How Unreal Transmits Primitive Data
 
-Because this process is a performance heavy task, Unreal does not regather and transmit new render states each frame, but rahter updates only the render states of the objects that are either newly created or updated. Consequently, if a static mesh actor remains unchanged in the scene, the rendering state representing its primitive scene proxy is not re-sent to the GPU.
+Unreal begins the process by scanning through the render scene to collect the rendering state of all relevant objects.
+These states, along with plenty of other scene data, get serialized into a stream of <CodeInline>FVector4f</CodeInline> elements.
+In this context, these elements serve as the fundamental raw memory units for Unreal Engine. This serialized stream is then pushed across the CPU-GPU boundary (into what Unreal calls the GPU Scene). Upon receiving the data, the GPU deserializes it to reconstruct the scene state on the GPU side.
 
-The goal of this implementation is not to rewrite this infrasturcture, but change it enough so that primitive proxies transmit their per-object clip plane 
-informations alongside their standard render states, allowing the GPU to unpact them correctly.
+<p align="center">
+  <img src="/blog/implementing-per-object-clip-planes/Image_InformationFlow.svg" alt="Information Flow"></img>
+</p>
 
-The first step toward achieving this is updating the corresponding render state. For a primitive scene proxy that render state class would be 
-<CodeInline>FPrimitiveUniformShaderParameters</CodeInline> which is the final stop of the rendering information before finally being serialized and sent to the GPU. A <CodeInline>FPrimitiveUniformShaderParameters</CodeInline> is derived from a primitive scene proxy and it is rather memory dense pod type of objects ready to be serialized.
+Because this process is a performance-heavy task, Unreal does not regather and retransmit render states every frame, but rather updates only the render states of objects that are either newly created or updated. Consequently, if a static mesh actor remains unchanged in the scene, the rendering state representing its primitive scene proxy is not re-sent to the GPU. This is exactly why the runtime setters in the previous chapter had to flag the primitive for an update.
 
+Whether it runs for a newly created object or for one that has just been flagged, each update follows the same path from the CPU to the GPU. The whole process explained above can be summarized into the following multi-stage pipeline, which also takes care of memory alignment along the way:
 
+1. **Information Gathering and Packing:** The render state is gathered from primitive scene proxies across the scene and packed into explicit shader parameter structures that enforce proper byte alignment before serialization.
+2. **Serialization:** The information is serialized into a contiguous stream of <CodeInline>FVector4f</CodeInline>s.
+3. **GPU Transmission:** The raw serialized data gets sent to the GPU.
+4. **Deserialization:** The GPU unpacks the stream back into its corresponding HLSL shader struct representation to be accessed during rendering.
 
+The goal of this implementation is not to rewrite this infrastructure, but to change it just enough so that primitive proxies transmit their per-object clip plane
+information alongside their standard render state, allowing the GPU to unpack it correctly. Therefore, the main focus here is on modifying steps 1, 2 and 4, as each of them has to learn about our new data. We are not going to change how the data is sent to the GPU (step 3), since it is not relevant to our implementation.
 
-The main modification 
+Before diving into the primitive data, it is worth noting that the primitive render state is only one of many uniform shader parameter structures in Unreal. The engine splits the information a shader
+needs into several structures, mostly grouped by how often their contents change. <CodeInline>FViewUniformShaderParameters</CodeInline> (bound as "View" in shaders) holds the per-view information
+such as the camera matrices, the viewport size, and the current time, and it is shared by every draw call rendered from that view. <CodeInline>FSceneTextureUniformParameters</CodeInline> gives the passes
+access to scene textures like the scene depth and the GBuffer. Every material gets a "Material" uniform buffer of its own, holding the values of its scalar, vector, and texture parameters, whose layout
+is generated when the material is compiled rather than written by hand. Finally, <CodeInline>FPrimitiveUniformShaderParameters</CodeInline> (bound as "Primitive") holds the information that is
+unique to each primitive. Since a per-object clip plane belongs to a single object, rather than to a view, a pass, or a material, this last structure is the natural place for our data.
 
+### Primitive Parameters: <CodeInline>FPrimitiveUniformShaderParameters</CodeInline>
 
+For a primitive scene proxy, the render state gathered in the first stage is <CodeInline>FPrimitiveUniformShaderParameters</CodeInline>. It is the final stop of the rendering information
+before being serialized and sent to the GPU. An <CodeInline>FPrimitiveUniformShaderParameters</CodeInline> instance is derived from a primitive scene proxy, and it is a rather memory-dense POD type ready to be serialized.
+It basically contains a list of properties such as the custom stencil value, visibility flags, object position, or custom primitive floats.
 
+It is safe to say that <CodeInline>FPrimitiveUniformShaderParameters</CodeInline> is basically the GPU-ready representation of a primitive scene proxy.
 
+The information it carries can be roughly grouped into a few categories:
+* **Transforms:** The local-to-world and world-to-local transforms of the primitive (<CodeInline>LocalToRelativeWorld</CodeInline>, <CodeInline>RelativeWorldToLocal</CodeInline>). Due to Large World Coordinates, they are stored relative to a separate high-precision position instead of as a single double-precision matrix.
+The transforms of the previous frame are kept as well, since they are needed to compute motion vectors.
+* **Bounds:** The world-space position and radius of the object, along with its local-space bounds (<CodeInline>LocalObjectBoundsMin</CodeInline>, <CodeInline>LocalObjectBoundsMax</CodeInline>).
+* **Indexing:** Offsets and indices pointing into other GPU Scene buffers, such as <CodeInline>InstanceSceneDataOffset</CodeInline> and <CodeInline>NumInstanceSceneDataEntries</CodeInline>, which link the primitive to its instances.
+* **Rendering state:** Bit-packed flags, the lighting channel mask, visibility flags, and the custom stencil value.
+* **User data:** The <CodeInline>CustomPrimitiveData</CodeInline> array, which can be filled from a component and read from any material.
 
+If you have ever used the Object Position, Object Radius, or Custom Primitive Data nodes in a material, you have already read from this structure. The shader code generated for those nodes
+simply fetches the corresponding field of the primitive being drawn. Our per-object clip plane is going to become one more of these fields, available to every shader that renders the primitive.
 
-The scene renderer constantly alloces an uniform buffer containing all the relevant informations about the scene on the GPU side. With many other things, Unreal maintains a special array of structs where each struct contains any rendering releated information about a primitive scene proxy. 
-
-The main target of this stage of the implementation is to update this struct so that this struct contains per-object clip plane releated information.
-When this is accomplished it is an easy task to query and primitive's per-object clip plane parameters in order to do lots of different task.
-
-
-
-
-Unreal constantly allocates a uniform buffer 
-Unreal scans throught the objects in the render scene and checks if there are any object whose render states are changed (due to creation or update). 
-It derives a 
-Unreal scans the scene and derives a render state from the object being present in the scene just to be sent to the GPU. The generated render state type
-can differ from one object to another. 
-
-Unreal Engine manages CPU to GPU memory transmission as well as the alignment through a structured multi-stage pipeline and this implementation requires to change all five stages of this system to allocate a place for per-object clip plane parameters to be placed :
-
-1. **Information Gathering** 
-
-Unreal starts the process by collecting the render releated information informations from the scene in a special from.
-Unreal starts this process by deriving an information object from the elements in the scene. This object is the final form 
-
-Each elements creates its corresponding form of information object. 
- This information is the final shape of the primitive 
-
-
-Unreal starts this process by collecting the render states of the objects in the scene. For a primitive scene proxy that render state is 
-
-
-Those render states are almost identical to the proxie's shader representations.  
-
-Unreal starts with collecting the rendering states of the 
-
-In order to render a scene correctly the GPU has to know about the object that it renders. Unreal provides this information by gathering the render states
-from the proxies across the scene. Yet this process is can tank the performance if it is done every frame. Therefore Unreal Engine drives an event based system just as it does with the scene proxies. As scene proxies gets only creates when 
-
-Unreal follows an event based g
-Unreal gathers the render state from primive scene proxies across the scene.
-
-
-1. **Information Gathering** : Render state is gathered from primitive scene proxies across the scene.
-2. **Parameter Struct Packing** : Data is packed into explicit shader parameter structures to enforce propery byte alignment before serialization. 
-3. **Serialization** : Information is serialized into contiguos streams of <CodeInline>FVector4f</CodeInline>'s. It can be though as the raw memory unit for Unreal in this context.
-4. **GPU Transmission** : The raw serialized data gets sent to the GPU.
-5. **Deserializatio** : The GPU unpacs the stream back into its corresponding HLSL shader struct representation to accessed during rendering.
-
-As the first first step 
-
-Unreal 
-
-
-
-### Primitive Parameters : <CodeInline>FPrimitiveUniformShaderParameters</CodeInline>
-
-
-
-
-For an information to be used by the GPU it should be serialized first. For Unreal it kinda means that the whole information should be serialized as a stream of <CodeInline>FVector4f</CodeInline>'s. This stream gets deserialized on the GPU side before being used.
-This information stream is basically a raw data steam and as with any other raw data operations the memory layout is the most crucial part in this
-process.
-
-It can be thought as the map of the data to be used while unpacking the data. Serializing and deserializing processes must agree on the layout
-in order to safely transfer data. Hence it can be said that it is a hidden packt in between the sender (in this case CPU) and the receiver (GPU for this implementation).
-
-
-
-
-
-Once a scene is ready unreal creates an uniform buffer containing any information releated to the world and in that buffer there is an array of structures whose each
-element contains rendering information releated to a single primitive proxy. The name of that structre is <CodeInline>FPrimitiveUniformShaderParameters</CodeInline> 
-and it basically contains a list of properties such as custom stencil value, visibility flags, object position, or custom primitive floats which are then sent out to the GPU.
-
+<CodeInline>FPrimitiveUniformShaderParameters</CodeInline> reaches the GPU through two routes. The primary one is the GPU Scene described in the previous section: the structure is serialized
+into the large <CodeInline>FVector4f</CodeInline> stream together with every other primitive in the scene, and shaders look up a primitive by its index. The second route is older, and it is where the name
+of the structure comes from. As the name suggests, <CodeInline>FPrimitiveUniformShaderParameters</CodeInline> is also a regular uniform buffer layout: a primitive scene proxy can fill a uniform buffer
+of its own with this structure, which then gets bound directly to its draw calls. This route is still used by the code paths that cannot read the GPU Scene, such as some mobile shaders.
+We will mostly deal with the first route, but the second one will come up again during unpacking, since both have to agree on the same data.
 
 <CodeBlock
   code={`
-
-/** 
-* The uniform shader parameters associated with a primitive. 
+/**
+* The uniform shader parameters associated with a primitive.
 * Note: Must match FPrimitiveSceneData in shaders.
 * Note 2: Try to keep this 16 byte aligned. i.e |Matrix4x4|Vector3,float|Vector3,float|Vector4|  _NOT_  |Vector3,(waste padding)|Vector3,(waste padding)|Vector3. Or at least mark out padding if it can't be avoided.
 */
 BEGIN_GLOBAL_SHADER_PARAMETER_STRUCT(FPrimitiveUniformShaderParameters,ENGINE_API)
-    SHADER_PARAMETER(uint32,    Flags)
+    SHADER_PARAMETER(uint32,        Flags)
     //...
-    SHADER_PARAMETER(float,     PixelProgrammableDistanceSquared)
-    SHADER_PARAMETER(float,     MaterialDisplacementFadeOutSize)
+    SHADER_PARAMETER(float,         PixelProgrammableDistanceSquared)
+    SHADER_PARAMETER(float,         MaterialDisplacementFadeOutSize)
     SHADER_PARAMETER(FUintVector2,  MeshPaintTextureDescriptor)
-    SHADER_PARAMETER(uint32,    NaniteRayTracingDataOffset)
-    SHADER_PARAMETER(float,     MaxWPOExtent)
-    SHADER_PARAMETER(uint32,    CustomStencilValueAndMask)
-    SHADER_PARAMETER(uint32,    VisibilityFlags)
+    SHADER_PARAMETER(uint32,        NaniteRayTracingDataOffset)
+    SHADER_PARAMETER(float,         MaxWPOExtent)
+    SHADER_PARAMETER(uint32,        CustomStencilValueAndMask)
+    SHADER_PARAMETER(uint32,        VisibilityFlags)
     SHADER_PARAMETER_ARRAY(FVector4f, CustomPrimitiveData, [FCustomPrimitiveData::NumCustomPrimitiveDataFloat4s]) // Custom data per primitive that can be accessed through material expression parameters and modified through UStaticMeshComponent
 END_GLOBAL_SHADER_PARAMETER_STRUCT()
 `}
   filename="PrimitiveUniformShaderParameters.h"
 />
 
-It is safe to say that <CodeInline>FPrimitiveUniformShaderParameters</CodeInline>'s are basically the GPU representations of a primitive scene proxy.
-It's definition differs from a regular strucutre and the reason behind this is providing memory alignment across CPU and GPU.
+Its definition looks a little different from a vanilla C++ structure. The reason behind that is that this structure has to follow some strict alignment rules to be unpacked by the GPU, but the overall
+layout is the same nevertheless. The structure header is defined with <CodeInline>BEGIN_GLOBAL_SHADER_PARAMETER_STRUCT(...)</CodeInline> instead of
+<CodeInline>struct FPrimitiveUniformShaderParameters</CodeInline>, and the structure body starts from that point. Then variables are defined using the <CodeInline>SHADER_PARAMETER(Type, Name)</CodeInline> macro.
+After all variables are defined, the body is terminated with the <CodeInline>END_GLOBAL_SHADER_PARAMETER_STRUCT()</CodeInline> macro.
 
 <Notification>
-
-These are not the point of implementation yet having some information about some of them may help to understand this document better.
+These macros are not the point of this implementation, yet having a rough idea of what they expand to may help to understand this document better.
 <CodeBlock
   code={`
-
-// It plays the role of struct definition. It gets the name of the struct  
-// and the module and then marks the starting point of the struct body. 
-// Can be thought as 
+// Plays the role of the struct definition. It takes the name of the struct
+// and the module, and then marks the starting point of the struct body.
+// Can be thought as
 // Module struct StructName
 // {
-
 BEGIN_GLOBAL_SHADER_PARAMETER_STRUCT(StructName, Module)
 
 // Defines a member field in the structure. Can be thought as (inside a struct)
-// ParamType Paramname;
-
+// ParamType ParamName;
 SHADER_PARAMETER(ParamType, ParamName)
 
-// Similart to SHADER_PARAMETER but specialized for arrays.
-// ParamType[NumberOfElements] Paramname;
-
+// Similar to SHADER_PARAMETER but specialized for arrays.
+// ParamType ParamName[NumberOfElements];
 SHADER_PARAMETER_ARRAY(ParamType, ParamName, NumberOfElements)
 
 // Marks the ending point of the structure body. Can be thought as
 // };
 END_GLOBAL_SHADER_PARAMETER_STRUCT()
 
+// Lives in a .cpp file. Registers the structure along with the name shaders use
+// to refer to its uniform buffer ("Primitive" in the case of our structure).
+IMPLEMENT_GLOBAL_SHADER_PARAMETER_STRUCT(StructName, "ShaderName")
 `}
-  filename="PrimitiveUniformShaderParameters.h"
+  filename=""
 />
 </Notification>
 
+The comment on top of the structure deserves a closer look, since it spells out the implicit memory contract described earlier.
 
+The first note states that the structure must match <CodeInline>FPrimitiveSceneData</CodeInline> in shaders. <CodeInline>FPrimitiveSceneData</CodeInline> is the HLSL mirror of this structure,
+and it is the one filled during the deserialization stage. A field that exists on one side but not on the other will either never be read, or worse, shift the position of every field that comes after it.
 
-### Extending the <CodeInline>FPrimitiveUniformShaderParameters</CodeInline>
+The second note is about alignment. GPUs read uniform data in 16-byte chunks, i.e. one <CodeInline>float4</CodeInline> at a time, and the HLSL packing rules do not allow a single member to straddle
+the boundary between two chunks. A <CodeInline>float3</CodeInline> followed by a <CodeInline>float</CodeInline> fits nicely into a single chunk, but two consecutive <CodeInline>float3</CodeInline>s force
+4 bytes of padding after the first one. A few wasted bytes may not seem like much, but this structure is sent for every primitive in the scene, so the waste is multiplied by thousands. That is why the engine
+developers ask for members to be grouped into 16-byte slots, and our new parameters have to follow the same rule.
 
-
-As said before <CodeInline>FPrimitiveUniformShaderParameters</CodeInline> is a structure which represents the render releated state of a primtive component on the CPU side. 
-By pu
-Step 2: The GPU Scene Pipeline (Inducing the Builder)
-
-All the implementation required to carry the information from the game thread to the proxies at the render thread is done.
-The next step is to carry the information to the GPU before using those values in shaders to cull actual vertices.
-But, before diving into the implementation it is required to take one step back and understand how unreal's buffer information pipeline is implemented.
-
-Even though proxies are the shadows of the game objects on the render thread they are still reside in the CPU. GPU has no idea about those 
-objects. It is required to send informations to the GPU so that gpu can use them to render the object.  Unreal employs information packages for this purpose which
-is called primitive uniform shader parameters or more technically <CodeInline>FPrimitiveUniformShaderParameters</CodeInline>. 
-Any rendering releated information stored within the proxy is compactly stored into this structure and then gets serialized into <CodeInline>FVector4f</CodeInline>s just to be
-unpacked by the GPU.
-
-Serializing and unpacking process of this data requires a carefull consideration since they represent a contract in between CPU and GPU. GPU has no way around other than trusting
-unpacking proccess to retreive the data sent by the CPU and since even reading one bit wrong can cause a disaster. For instance, lets say 
-13th <CodeInline>FVector4f</CodeInline> contains the information about the word location of the component in its first three elements. Then the GPU has to look at exacly to that location 
-to unpack the world location, not 14th <CodeInline>FVector4f</CodeInline> or not the last three elements of 13th <CodeInline>FVector4f</CodeInline>.
-
-To create a <CodeInline>FPrimitiveUniformShaderParameters</CodeInline> instance from a primitive scene proxy an intermediatery object call <CodeInline>FPrimitiveUniformShaderParametersBuilder</CodeInline>
-is used (just like <CodeInline>FPrimitiveSceneProxyDesc</CodeInline>). This object is responsible converting the information stored in the proxy to a <CodeInline>FPrimitiveUniformShaderParameters</CodeInline> instance. 
-Then this instance is serialized into a stream of <CodeInline>FVector4f</CodeInline> before sending it to the GPU. 
-
-In overall, the general pipeline is very similar with the previous one. Inspect the following diagram.
-
-<p align="center">
-  <img src="/blog/implementing-per-object-clip-planes/Image_BuilderInformationFlow.svg" alt="Plane"></img>
-</p>
-
-We are going to execute the following steps to alter the pipeline above to send our data as well.
-1. Create new variables in the <CodeInline>FPrimitiveUniformShaderParameters</CodeInline> so that we have a place to store per-object clip plane parameters into <CodeInline>FPrimitiveUniformShaderParameters</CodeInline>
-2. Update <CodeInline>FPrimitiveUniformShaderParametersBuilder</CodeInline> so that it stores our data into the variables defined in the previous step.
-3. Updating the serialization process to handle newly created paraemeters. 
-
-### Creating new variables to store per-object clip plane parameters.
-It is required to allocate some space to put our two variables required for our per-object clip plane implementation.
-* The plane itself (in compact form) 
-* A flag to indicate whether per-object clip plane is enabled on that primitive
-
-#### Per-Object Clip Plane Parameter
-Doing the first one is relatively easy. All we need to do is to define a <CodeInline>FVecto4f</CodeInline> variable in the <CodeInline>FPrimitiveUniformShaderParameters</CodeInline> structure.
-
-Here is the structure definition.
-
-
-<CodeBlock
-  code={`
-
-/** 
-* The uniform shader parameters associated with a primitive. 
-* Note: Must match FPrimitiveSceneData in shaders.
-* Note 2: Try to keep this 16 byte aligned. i.e |Matrix4x4|Vector3,float|Vector3,float|Vector4|  _NOT_  |Vector3,(waste padding)|Vector3,(waste padding)|Vector3. Or at least mark out padding if it can't be avoided.
-*/
-BEGIN_GLOBAL_SHADER_PARAMETER_STRUCT(FPrimitiveUniformShaderParameters,ENGINE_API)
-    SHADER_PARAMETER(uint32,		Flags)
-    //...
-    SHADER_PARAMETER(float,			PixelProgrammableDistanceSquared)
-    SHADER_PARAMETER(float,			MaterialDisplacementFadeOutSize)
-    SHADER_PARAMETER(FUintVector2,	MeshPaintTextureDescriptor)
-    SHADER_PARAMETER(uint32,		NaniteRayTracingDataOffset)
-    SHADER_PARAMETER(float,			MaxWPOExtent)
-    SHADER_PARAMETER(uint32,		CustomStencilValueAndMask)
-    SHADER_PARAMETER(uint32,		VisibilityFlags)
-	  SHADER_PARAMETER_ARRAY(FVector4f, CustomPrimitiveData, [FCustomPrimitiveData::NumCustomPrimitiveDataFloat4s]) // Custom data per primitive that can be accessed through material expression parameters and modified through UStaticMeshComponent
-END_GLOBAL_SHADER_PARAMETER_STRUCT()
-`}
-  filename="PrimitiveUniformShaderParameters.h"
-/>
-
-
-It looks like a little bit different than vanilla C++ structures. The reason behind that is this structure has to follow some strict alignment rules to be unpacked by the GPU. But the overall
-layout is the same neverthless. First the structure header is defined with <CodeInline>BEGIN_GLOBAL_SHADER_PARAMETER_STRUCT(FPrimitiveUniformShaderParameters,ENGINE_API)</CodeInline> instead of 
-<CodeInline>struct FPrimitiveUniformShaderParameters</CodeInline>, structure body starts from that point. Then variables are defined by using <CodeInline>SHADER_PARAMETER(type, Name)</CodeInline> macro.
-After finishing defining variables in the structure body, the body is terminated by calling <CodeInline>END_GLOBAL_SHADER_PARAMETER_STRUCT()</CodeInline> macro.
+The macros help with this. Each <CodeInline>SHADER_PARAMETER</CodeInline> carries a compile-time check, so a misaligned member causes a <CodeInline>static_assert</CodeInline> failure instead of silently corrupted data
+on the GPU. The macros also generate reflection metadata for the structure, which the engine uses to automatically generate the matching HLSL declaration of the "Primitive" uniform buffer.
 
 <Notification>
-The general layout of the structure can look like a little bit different at the time of your implementation. Since this structure represents a primitive component at GPU it 
-faces frequent changes as new features are implemented in the engine
+The general layout of the structure may look a little different at the time of your implementation. Since this structure represents a primitive component on the GPU, it
+faces frequent changes as new features are implemented in the engine.
 </Notification>
 
-It is as easy as adding another shader paraemeter with type <CodeInline>FVector4f</CodeInline>.
+To create an <CodeInline>FPrimitiveUniformShaderParameters</CodeInline> instance from a primitive scene proxy, an intermediary object called <CodeInline>FPrimitiveUniformShaderParametersBuilder</CodeInline>
+is used (just like <CodeInline>FPrimitiveSceneProxyDesc</CodeInline>). This object is responsible for converting the information stored in the proxy into an <CodeInline>FPrimitiveUniformShaderParameters</CodeInline> instance.
+Then this instance is serialized into a stream of <CodeInline>FVector4f</CodeInline>s before being sent to the GPU.
 
-<CodeBlock
-  code={`
-
-/** 
-* The uniform shader parameters associated with a primitive. 
-* Note: Must match FPrimitiveSceneData in shaders.
-* Note 2: Try to keep this 16 byte aligned. i.e |Matrix4x4|Vector3,float|Vector3,float|Vector4|  _NOT_  |Vector3,(waste padding)|Vector3,(waste padding)|Vector3. Or at least mark out padding if it can't be avoided.
-*/
-BEGIN_GLOBAL_SHADER_PARAMETER_STRUCT(FPrimitiveUniformShaderParameters,ENGINE_API)
-    SHADER_PARAMETER(uint32,		Flags) //We're going to get to this in a moment.
-    //...
-    SHADER_PARAMETER(float,			PixelProgrammableDistanceSquared)
-    SHADER_PARAMETER(float,			MaterialDisplacementFadeOutSize)
-    SHADER_PARAMETER(FUintVector2,	MeshPaintTextureDescriptor)
-    SHADER_PARAMETER(uint32,		NaniteRayTracingDataOffset)
-    SHADER_PARAMETER(float,			MaxWPOExtent)
-    SHADER_PARAMETER(uint32,		CustomStencilValueAndMask)
-    SHADER_PARAMETER(uint32,		VisibilityFlags)
-    SHADER_PARAMETER(FVector4f,     PerObjectClipPlane)  // here lies our new parameter 
-	  SHADER_PARAMETER_ARRAY(FVector4f, CustomPrimitiveData, [FCustomPrimitiveData::NumCustomPrimitiveDataFloat4s]) // Custom data per primitive that can be accessed through material expression parameters and modified through UStaticMeshComponent
-END_GLOBAL_SHADER_PARAMETER_STRUCT()
-`}
-  filename="PrimitiveUniformShaderParameters.h"
-/>
-
-There is one thing to do before marking this task as done. It is previously mentioned that <CodeInline>FPrimitiveUniformShaderParameters</CodeInline> structure is
-serialied into a stream of <CodeInline>FVector4f</CodeInline> s and the deserialized (or unpacked) by the GPU. Much like the following.
+Overall, the pipeline is very similar to the proxy creation one. Inspect the following diagram.
 
 <p align="center">
-  <img src="/blog/implementing-per-object-clip-planes/Image_SerializationInformationFlow.svg" alt="Plane"></img>
+  <img src="/blog/implementing-per-object-clip-planes/Image_BuilderInformationFlow.svg" alt="Builder Information Flow"></img>
 </p>
 
-The issue here is that GPU has to know the exact size of a FPrimitiveUniformShaderParameters instance in terms of <CodeInline>FVector4f</CodeInline> before trying to unpack one at the GPU side.
-Unreal uses a macro parameter for that purpose, <CodeInline> PRIMITIVE_SCENE_DATA_STRIDE </CodeInline>. The same paramater is read by GPU while unpacking the data.
-What we are going to do is to increment that value by one to reflect the memory allocated by our newly added <CodeInline>PerObjectClipPlane</CodeInline> parameter. 
+We are going to execute the following steps to alter the pipeline above so that it sends our data as well:
+1. Create new variables in <CodeInline>FPrimitiveUniformShaderParameters</CodeInline>, so that there is a place to store the per-object clip plane parameters.
+2. Update <CodeInline>FPrimitiveUniformShaderParametersBuilder</CodeInline>, so that it stores our data into the variables defined in the previous step.
+3. Update the serialization (packing) process to handle the newly created parameters.
+4. Update the deserialization (unpacking) process on the GPU to read them back.
+
+### Adding the Per-Object Clip Plane Parameter
+Two pieces of information have to be carried for our per-object clip plane implementation:
+* The plane itself (in compact form).
+* A flag indicating whether the per-object clip plane is enabled on that primitive.
+
+The first one is relatively easy. All we need to do is define an <CodeInline>FVector4f</CodeInline> variable in the <CodeInline>FPrimitiveUniformShaderParameters</CodeInline> structure.
+It is as easy as adding another shader parameter. We place it right before the custom primitive data array, which keeps the structure 16-byte aligned since an <CodeInline>FVector4f</CodeInline> is exactly 16 bytes.
 
 <CodeBlock
   code={`
-
-// #define PRIMITIVE_SCENE_DATA_STRIDE 43 old value 
-#define PRIMITIVE_SCENE_DATA_STRIDE 44 // incremented by one 
-`}
-  filename="SceneDefinitions.h"
-/>
-
-
-#### Per-Object Clip Plane Enabled Flag Parameter
-
-Adding a boolean flag parameter is a little bit tricky specially when it is compared to the clip plane parameter. 
-The difference arises due to boolean variables' rare property of only requiring one bit but occupying 8 bits on the memory instead. 
-This is because the minimum addressable memory unit in our computers is one byte (8 bits in most cases) not one bit. 
-
-This is generally omitted while writing code since 7 bits are not that much memory. But when it comes to sending data to 
-in between peripherals every bit counts. Sending more data than needed can tank the performance. To mostly avoid this issue Unreal tightly packs every data
-as much as possible, booleans included. Instead of using a byte of memory to send a boolean flag unreal allocates an 32 bit floating point memory and uses each bit to
-store the information of a different boolean flag, hence uses one bit of memory to send a boolean variable. 
-
-<Notification>
-Some developers heads may be in alarm thinking that what if we reqire to send boolean flags more than 32. Actually I am one of those developers. In 5.4 last 8 bits were left unused but 
-it is far less in 5.8. I guess we will find out very soon. 
-</Notification>
-
-You can see that 32 bit flag container parameter in FPrimitiveUniformShaderParameters sturcture.
-
-
-<CodeBlock
-  code={`
-
-/** 
-* The uniform shader parameters associated with a primitive. 
-* Note: Must match FPrimitiveSceneData in shaders.
-* Note 2: Try to keep this 16 byte aligned. i.e |Matrix4x4|Vector3,float|Vector3,float|Vector4|  _NOT_  |Vector3,(waste padding)|Vector3,(waste padding)|Vector3. Or at least mark out padding if it can't be avoided.
-*/
 BEGIN_GLOBAL_SHADER_PARAMETER_STRUCT(FPrimitiveUniformShaderParameters,ENGINE_API)
-    SHADER_PARAMETER(uint32,		Flags) //<-- Right here, it contains a different flag in its each bit (32 bits 32 different flags)
+    SHADER_PARAMETER(uint32,        Flags) //We're going to get to this in a moment.
     //...
-    SHADER_PARAMETER(float,			PixelProgrammableDistanceSquared)
-    SHADER_PARAMETER(float,			MaterialDisplacementFadeOutSize)
-    SHADER_PARAMETER(FUintVector2,	MeshPaintTextureDescriptor)
-    SHADER_PARAMETER(uint32,		NaniteRayTracingDataOffset)
-    SHADER_PARAMETER(float,			MaxWPOExtent)
-    SHADER_PARAMETER(uint32,		CustomStencilValueAndMask)
-    SHADER_PARAMETER(uint32,		VisibilityFlags)
-    SHADER_PARAMETER(FVector4f,     PerObjectClipPlane) 
-	  SHADER_PARAMETER_ARRAY(FVector4f, CustomPrimitiveData, [FCustomPrimitiveData::NumCustomPrimitiveDataFloat4s]) // Custom data per primitive that can be accessed through material expression parameters and modified through UStaticMeshComponent
+    SHADER_PARAMETER(float,         PixelProgrammableDistanceSquared)
+    SHADER_PARAMETER(float,         MaterialDisplacementFadeOutSize)
+    SHADER_PARAMETER(FUintVector2,  MeshPaintTextureDescriptor)
+    SHADER_PARAMETER(uint32,        NaniteRayTracingDataOffset)
+    SHADER_PARAMETER(float,         MaxWPOExtent)
+    SHADER_PARAMETER(uint32,        CustomStencilValueAndMask)
+    SHADER_PARAMETER(uint32,        VisibilityFlags)
+    SHADER_PARAMETER(FVector4f,     PerObjectClipPlane)  // here lies our new parameter
+    SHADER_PARAMETER_ARRAY(FVector4f, CustomPrimitiveData, [FCustomPrimitiveData::NumCustomPrimitiveDataFloat4s]) // Custom data per primitive that can be accessed through material expression parameters and modified through UStaticMeshComponent
 END_GLOBAL_SHADER_PARAMETER_STRUCT()
 `}
   filename="PrimitiveUniformShaderParameters.h"
 />
 
-We are going to use an unused bit of that flags parameters to store the <CodeInline>bPerObjectClipPlaneEnabled</CodeInline> information. Luckly unreal has a list of masks 
-defining which bit of <CodeInline>Flags</CodeInline> parameter is used to for which flag. Those bit masks can be found in <CodeInline>SceneDefinitions.h</CodeInline> file.
+The builder needs a way to fill this new field. The engine already provides a macro that generates a chainable setter writing directly into the parameters struct, so we reuse it and
+give the field a sane default:
 
 <CodeBlock
   code={`
-
-// Primitive scene data flags
-/*---- ---- ---- ---- ---- ---- ----- xxxx */
-#define PRIMITIVE_SCENE_DATA_FLAG_CAST_SHADOWS								0x1
-#define PRIMITIVE_SCENE_DATA_FLAG_USE_SINGLE_SAMPLE_SHADOW_SL				0x2
-#define PRIMITIVE_SCENE_DATA_FLAG_USE_VOLUMETRIC_LM_SHADOW_SL				0x4
-#define PRIMITIVE_SCENE_DATA_FLAG_DECAL_RECEIVER							0x8
-
-/*---- ---- ---- ---- ---- ---- xxxx ---- */
-#define PRIMITIVE_SCENE_DATA_FLAG_CACHE_SHADOW_AS_STATIC					0x10
-#define PRIMITIVE_SCENE_DATA_FLAG_OUTPUT_VELOCITY							0x20
-#define PRIMITIVE_SCENE_DATA_FLAG_DETERMINANT_SIGN							0x40
-#define PRIMITIVE_SCENE_DATA_FLAG_HAS_DISTANCE_FIELD_REPRESENTATION			0x80
-
-/*---- ---- ---- ---- ---- xxxx ---- ---- */
-#define PRIMITIVE_SCENE_DATA_FLAG_HAS_CAPSULE_REPRESENTATION				0x100
-#define PRIMITIVE_SCENE_DATA_FLAG_HAS_CAST_CONTACT_SHADOW					0x200
-#define PRIMITIVE_SCENE_DATA_FLAG_HAS_PRIMITIVE_CUSTOM_DATA					0x400
-#define PRIMITIVE_SCENE_DATA_FLAG_LIGHTING_CHANNEL_0						0x800
-
-/*---- ---- ---- ---- xxxx ---- ---- ---- */
-#define PRIMITIVE_SCENE_DATA_FLAG_LIGHTING_CHANNEL_1						0x1000
-#define PRIMITIVE_SCENE_DATA_FLAG_LIGHTING_CHANNEL_2						0x2000
-#define PRIMITIVE_SCENE_DATA_FLAG_HAS_INSTANCE_LOCAL_BOUNDS					0x4000
-#define PRIMITIVE_SCENE_DATA_FLAG_EVALUATE_WORLD_POSITION_OFFSET			0x8000
-
-/*---- ---- ---- xxxx ---- ---- ---- ---- */
-#define PRIMITIVE_SCENE_DATA_FLAG_HAS_NANITE_IMPOSTER						0x10000
-#define PRIMITIVE_SCENE_DATA_FLAG_INSTANCE_DRAW_DISTANCE_CULL				0x20000
-#define PRIMITIVE_SCENE_DATA_FLAG_WPO_DISABLE_DISTANCE						0x40000
-#define PRIMITIVE_SCENE_DATA_FLAG_HAS_ALWAYS_EVALUATE_WPO_MATERIALS			0x80000
-
-/*---- ---- xxxx ---- ---- ---- ---- ---- */
-#define PRIMITIVE_SCENE_DATA_FLAG_WRITES_CUSTOM_DEPTH_STENCIL				0x100000
-#define PRIMITIVE_SCENE_DATA_FLAG_DISABLE_MATERIAL_INVALIDATIONS			0x200000
-#define PRIMITIVE_SCENE_DATA_FLAG_HOLDOUT									0x400000
-#define PRIMITIVE_SCENE_DATA_FLAG_SPLINE_MESH								0x800000
-
-/*---- xxxx ---- ---- ---- ---- ---- ---- */
-#define PRIMITIVE_SCENE_DATA_FLAG_SKINNED_MESH								0x1000000
-#define PRIMITIVE_SCENE_DATA_FLAG_INSTANCE_CULLING_OCCLUSION_QUERIES		0x2000000 // Whether per-instance occlusion queries are allowed when performing GPUScene instance culling
-#define PRIMITIVE_SCENE_DATA_FLAG_HAS_PIXEL_ANIMATION						0x4000000
-#define PRIMITIVE_SCENE_DATA_FLAG_RAYTRACING_FAR_FIELD						0x8000000
-
-/*xxxx ---- ---- ---- ---- ---- ---- ---- */
-#define PRIMITIVE_SCENE_DATA_FLAG_RAYTRACING_HAS_GROUPID					0x10000000
-#define PRIMITIVE_SCENE_DATA_FLAG_PER_CLUSTER_DISPLACEMENT_FALLBACK_RASTER	0x20000000
-#define PRIMITIVE_SCENE_DATA_FLAG_IS_FIRST_PERSON_PRIMITIVE					0x40000000
-
-`}
-  filename="SceneDefinitions.h"
-/>
-
-Actually the last bit of 32 bit <CodeInline>Flags</CodeInline> <CodeInline>0x80000000</CodeInline> is unused. We are going to use that bit to store our data.
-
-
-<CodeBlock
-  code={`
-
-// Primitive scene data flags
-/*---- ---- ---- ---- ---- ---- ----- xxxx */
-#define PRIMITIVE_SCENE_DATA_FLAG_CAST_SHADOWS								0x1
-#define PRIMITIVE_SCENE_DATA_FLAG_USE_SINGLE_SAMPLE_SHADOW_SL				0x2
-#define PRIMITIVE_SCENE_DATA_FLAG_USE_VOLUMETRIC_LM_SHADOW_SL				0x4
-#define PRIMITIVE_SCENE_DATA_FLAG_DECAL_RECEIVER							0x8
-.
-.
-.
-/*xxxx ---- ---- ---- ---- ---- ---- ---- */
-#define PRIMITIVE_SCENE_DATA_FLAG_RAYTRACING_HAS_GROUPID					0x10000000
-#define PRIMITIVE_SCENE_DATA_FLAG_PER_CLUSTER_DISPLACEMENT_FALLBACK_RASTER	0x20000000
-#define PRIMITIVE_SCENE_DATA_FLAG_IS_FIRST_PERSON_PRIMITIVE					0x40000000
-#define PRIMITIVE_SCENE_DATA_FLAG_IS_FIRST_PERSON_PRIMITIVE					0x40000000
-#define PRIMITIVE_SCENE_DATA_FLAG_PER_OBJECT_CLIP_PLANE_ENABLED         	0x80000000 // Here
-
-`}
-  filename="SceneDefinitions.h"
-/>
-
-We logically reserved the last bit of the <CodeInline>Flags</CodeInline> parameter for our per object clip plane enabled flag. It is time to actually store the information into that bit.
-The first thing to do is to store the information into the builder so that we can use that information to change the bits value later. Additionally it is required to 
-provide mutator function as we did for <CodeInline>PerObjectClipPlane</CodeInline> parameter for external codes.
-
-
-<CodeBlock
-  code={`
-
 struct FPrimitiveUniformShaderParametersBuilder
 {
 public:
-	inline FPrimitiveUniformShaderParametersBuilder& Defaults()
-	{
-      //...
-      bPerObjectClipPlaneEnabled                  = false;
-  }
+    inline FPrimitiveUniformShaderParametersBuilder& Defaults()
+    {
+        //...
+        Parameters.PerObjectClipPlane = FVector4f::Zero();
+        //...
+    }
+
+    //...
+    PRIMITIVE_UNIFORM_BUILDER_METHOD(FVector4f, PerObjectClipPlane); // Generates PerObjectClipPlane(FVector4f InPerObjectClipPlane)
+    //...
+}
+`}
+  filename="PrimitiveUniformShaderParameters.h"
+/>
+
+There is one more thing to do before marking this task as done. As mentioned before, the <CodeInline>FPrimitiveUniformShaderParameters</CodeInline> structure is
+serialized into a stream of <CodeInline>FVector4f</CodeInline>s and then deserialized (or unpacked) by the GPU, much like the following.
+
+<p align="center">
+  <img src="/blog/implementing-per-object-clip-planes/Image_SerializationInformationFlow.svg" alt="Serialization Information Flow"></img>
+</p>
+
+The issue here is that both sides have to know the exact size of a single primitive's data in terms of <CodeInline>FVector4f</CodeInline>s: the CPU to allocate the stream, and the GPU to find where
+a given primitive starts. Unreal uses a macro for that purpose, <CodeInline>PRIMITIVE_SCENE_DATA_STRIDE</CodeInline>, which is shared between C++ and the shaders.
+We are going to increment that value by one to reflect the memory allocated by our newly added <CodeInline>PerObjectClipPlane</CodeInline> parameter.
+
+<CodeBlock
+  code={`
+// #define PRIMITIVE_SCENE_DATA_STRIDE 43 old value
+#define PRIMITIVE_SCENE_DATA_STRIDE 44 // incremented by one
+`}
+  filename="SceneDefinitions.h"
+/>
+
+
+### Adding the Per-Object Clip Plane Enabled Flag
+
+Adding a boolean flag parameter is a little bit trickier, especially when compared to the clip plane parameter.
+The difference arises from a peculiar property of boolean variables: they only require one bit, but occupy 8 bits in memory instead.
+This is because the minimum addressable memory unit in our computers is one byte (8 bits in most cases), not one bit.
+
+This is generally ignored while writing code, since 7 bits are not that much memory. But when it comes to sending data
+between devices, every bit counts. Sending more data than needed can tank performance. To avoid this issue, Unreal packs data as tightly
+as possible, booleans included. Instead of using a byte of memory for each boolean flag, Unreal allocates a single 32-bit unsigned integer and uses each of its bits to
+store a different boolean flag, hence spending exactly one bit per boolean.
+
+<Notification>
+Some developers' heads may be sounding the alarm, asking what happens if more than 32 boolean flags are ever required. Actually, I am one of those developers. In 5.4 the last 8 bits were left unused, but
+far fewer are free in 5.8. I guess we will find out very soon.
+</Notification>
+
+You can see that 32-bit flag container, <CodeInline>Flags</CodeInline>, in the <CodeInline>FPrimitiveUniformShaderParameters</CodeInline> structure.
+
+<CodeBlock
+  code={`
+BEGIN_GLOBAL_SHADER_PARAMETER_STRUCT(FPrimitiveUniformShaderParameters,ENGINE_API)
+    SHADER_PARAMETER(uint32,        Flags) //<-- Right here, it contains a different flag in each bit (32 bits, 32 different flags)
+    //...
+    SHADER_PARAMETER(FVector4f,     PerObjectClipPlane)
+    SHADER_PARAMETER_ARRAY(FVector4f, CustomPrimitiveData, [FCustomPrimitiveData::NumCustomPrimitiveDataFloat4s])
+END_GLOBAL_SHADER_PARAMETER_STRUCT()
+`}
+  filename="PrimitiveUniformShaderParameters.h"
+/>
+
+We are going to use an unused bit of that <CodeInline>Flags</CodeInline> parameter to store the <CodeInline>bPerObjectClipPlaneEnabled</CodeInline> information. Luckily, Unreal has a list of masks
+defining which bit of the <CodeInline>Flags</CodeInline> parameter is used for which flag. Those bit masks can be found in the <CodeInline>SceneDefinitions.h</CodeInline> file.
+
+<CodeBlock
+  code={`
+// Primitive scene data flags
+/*---- ---- ---- ---- ---- ---- ---- xxxx */
+#define PRIMITIVE_SCENE_DATA_FLAG_CAST_SHADOWS                              0x1
+#define PRIMITIVE_SCENE_DATA_FLAG_USE_SINGLE_SAMPLE_SHADOW_SL               0x2
+#define PRIMITIVE_SCENE_DATA_FLAG_USE_VOLUMETRIC_LM_SHADOW_SL               0x4
+#define PRIMITIVE_SCENE_DATA_FLAG_DECAL_RECEIVER                            0x8
+
+/*---- ---- ---- ---- ---- ---- xxxx ---- */
+#define PRIMITIVE_SCENE_DATA_FLAG_CACHE_SHADOW_AS_STATIC                    0x10
+#define PRIMITIVE_SCENE_DATA_FLAG_OUTPUT_VELOCITY                           0x20
+#define PRIMITIVE_SCENE_DATA_FLAG_DETERMINANT_SIGN                          0x40
+#define PRIMITIVE_SCENE_DATA_FLAG_HAS_DISTANCE_FIELD_REPRESENTATION         0x80
+
+/*---- ---- ---- ---- ---- xxxx ---- ---- */
+#define PRIMITIVE_SCENE_DATA_FLAG_HAS_CAPSULE_REPRESENTATION                0x100
+#define PRIMITIVE_SCENE_DATA_FLAG_HAS_CAST_CONTACT_SHADOW                   0x200
+#define PRIMITIVE_SCENE_DATA_FLAG_HAS_PRIMITIVE_CUSTOM_DATA                 0x400
+#define PRIMITIVE_SCENE_DATA_FLAG_LIGHTING_CHANNEL_0                        0x800
+
+/*---- ---- ---- ---- xxxx ---- ---- ---- */
+#define PRIMITIVE_SCENE_DATA_FLAG_LIGHTING_CHANNEL_1                        0x1000
+#define PRIMITIVE_SCENE_DATA_FLAG_LIGHTING_CHANNEL_2                        0x2000
+#define PRIMITIVE_SCENE_DATA_FLAG_HAS_INSTANCE_LOCAL_BOUNDS                 0x4000
+#define PRIMITIVE_SCENE_DATA_FLAG_EVALUATE_WORLD_POSITION_OFFSET            0x8000
+
+/*---- ---- ---- xxxx ---- ---- ---- ---- */
+#define PRIMITIVE_SCENE_DATA_FLAG_HAS_NANITE_IMPOSTER                       0x10000
+#define PRIMITIVE_SCENE_DATA_FLAG_INSTANCE_DRAW_DISTANCE_CULL               0x20000
+#define PRIMITIVE_SCENE_DATA_FLAG_WPO_DISABLE_DISTANCE                      0x40000
+#define PRIMITIVE_SCENE_DATA_FLAG_HAS_ALWAYS_EVALUATE_WPO_MATERIALS         0x80000
+
+/*---- ---- xxxx ---- ---- ---- ---- ---- */
+#define PRIMITIVE_SCENE_DATA_FLAG_WRITES_CUSTOM_DEPTH_STENCIL               0x100000
+#define PRIMITIVE_SCENE_DATA_FLAG_DISABLE_MATERIAL_INVALIDATIONS            0x200000
+#define PRIMITIVE_SCENE_DATA_FLAG_HOLDOUT                                   0x400000
+#define PRIMITIVE_SCENE_DATA_FLAG_SPLINE_MESH                               0x800000
+
+/*---- xxxx ---- ---- ---- ---- ---- ---- */
+#define PRIMITIVE_SCENE_DATA_FLAG_SKINNED_MESH                              0x1000000
+#define PRIMITIVE_SCENE_DATA_FLAG_INSTANCE_CULLING_OCCLUSION_QUERIES        0x2000000 // Whether per-instance occlusion queries are allowed when performing GPUScene instance culling
+#define PRIMITIVE_SCENE_DATA_FLAG_HAS_PIXEL_ANIMATION                       0x4000000
+#define PRIMITIVE_SCENE_DATA_FLAG_RAYTRACING_FAR_FIELD                      0x8000000
+
+/*xxxx ---- ---- ---- ---- ---- ---- ---- */
+#define PRIMITIVE_SCENE_DATA_FLAG_RAYTRACING_HAS_GROUPID                    0x10000000
+#define PRIMITIVE_SCENE_DATA_FLAG_PER_CLUSTER_DISPLACEMENT_FALLBACK_RASTER  0x20000000
+#define PRIMITIVE_SCENE_DATA_FLAG_IS_FIRST_PERSON_PRIMITIVE                 0x40000000
+`}
+  filename="SceneDefinitions.h"
+/>
+
+As it turns out, the most significant bit of the 32-bit <CodeInline>Flags</CodeInline>, <CodeInline>0x80000000</CodeInline>, is unused. We are going to use that bit to store our data.
+
+<CodeBlock
+  code={`
+// Primitive scene data flags
+/*---- ---- ---- ---- ---- ---- ---- xxxx */
+#define PRIMITIVE_SCENE_DATA_FLAG_CAST_SHADOWS                              0x1
+#define PRIMITIVE_SCENE_DATA_FLAG_USE_SINGLE_SAMPLE_SHADOW_SL               0x2
+#define PRIMITIVE_SCENE_DATA_FLAG_USE_VOLUMETRIC_LM_SHADOW_SL               0x4
+#define PRIMITIVE_SCENE_DATA_FLAG_DECAL_RECEIVER                            0x8
+//...
+/*xxxx ---- ---- ---- ---- ---- ---- ---- */
+#define PRIMITIVE_SCENE_DATA_FLAG_RAYTRACING_HAS_GROUPID                    0x10000000
+#define PRIMITIVE_SCENE_DATA_FLAG_PER_CLUSTER_DISPLACEMENT_FALLBACK_RASTER  0x20000000
+#define PRIMITIVE_SCENE_DATA_FLAG_IS_FIRST_PERSON_PRIMITIVE                 0x40000000
+#define PRIMITIVE_SCENE_DATA_FLAG_PER_OBJECT_CLIP_PLANE_ENABLED             0x80000000 // Here
+`}
+  filename="SceneDefinitions.h"
+/>
+
+We have now logically reserved the last bit of the <CodeInline>Flags</CodeInline> parameter for our per-object clip plane enabled flag. It is time to actually store the information in that bit.
+The first thing to do is to store the information in the builder, so that it can be used to set the bit later. Additionally, a
+mutator function has to be provided for external code, just as we did for the <CodeInline>PerObjectClipPlane</CodeInline> parameter. This time we use the flag flavor of the builder macro, which writes into a
+builder-side boolean instead of the parameters struct.
+
+<CodeBlock
+  code={`
+struct FPrimitiveUniformShaderParametersBuilder
+{
+public:
+    inline FPrimitiveUniformShaderParametersBuilder& Defaults()
+    {
+        //...
+        bPerObjectClipPlaneEnabled = false;
+        //...
+    }
 
 #define PRIMITIVE_UNIFORM_BUILDER_FLAG_METHOD(INPUT_TYPE, VARIABLE_NAME) \\
-	  inline FPrimitiveUniformShaderParametersBuilder& VARIABLE_NAME(INPUT_TYPE In##VARIABLE_NAME) { b##VARIABLE_NAME = In##VARIABLE_NAME; return *this; }
+    inline FPrimitiveUniformShaderParametersBuilder& VARIABLE_NAME(INPUT_TYPE In##VARIABLE_NAME) { b##VARIABLE_NAME = In##VARIABLE_NAME; return *this; }
 
     //...
-    PRIMITIVE_UNIFORM_BUILDER_FLAG_METHOD(bool, PerObjectClipPlaneEnabled); // <-- These methods are defined to allow external manipulation, a basic setter.
+    PRIMITIVE_UNIFORM_BUILDER_FLAG_METHOD(bool, PerObjectClipPlaneEnabled); // <-- A basic setter, generated to allow external manipulation.
     //...
 
+private:
     //...
     uint32 bPerObjectClipPlaneEnabled : 1;
-} 
-`}
-  filename="PrimitiveUniformShaderParameters.h"
-/>
-
-Our beloved scene proxy call the mutator function to store the information into the builder.eee 
-
-
-
-<CodeBlock
-  code={`
-
-struct FPrimitiveUniformShaderParametersBuilder
-{
-  .
-  .
-  .
-  void FPrimitiveSceneProxy::BuildUniformShaderParameters(FPrimitiveUniformShaderParametersBuilder &Builder) const
-  {
-      //...
-      // Update the uniform shader parameters.
-      Builder = FPrimitiveUniformShaderParametersBuilder{}
-          .Defaults()
-              .LocalToWorld(LocalToWorld)
-              .PreviousLocalToWorld(PreviousLocalToWorld)
-              .ActorWorldPosition(ActorPosition)
-              .WorldBounds(Bounds)
-              .LocalBounds(LocalBounds)
-              //...
-              .PerObjectClipPlaneEnabled(bPerObjectClipPlaneEnabled); // we call the mutator function to modify the internal parameter of the builder.
-  }
-  .
-  .
-  .
 }
 `}
   filename="PrimitiveUniformShaderParameters.h"
 />
 
-
-While building the actual parameters struct we are going to follow the general convention that unreal uses to modify other bit flags.
+Our beloved scene proxy calls both setters to store its information in the builder.
 
 <CodeBlock
   code={`
+void FPrimitiveSceneProxy::BuildUniformShaderParameters(FPrimitiveUniformShaderParametersBuilder &Builder) const
+{
+    //...
+    // Update the uniform shader parameters.
+    Builder = FPrimitiveUniformShaderParametersBuilder{}
+        .Defaults()
+            .LocalToWorld(LocalToWorld)
+            .PreviousLocalToWorld(PreviousLocalToWorld)
+            .ActorWorldPosition(ActorPosition)
+            .WorldBounds(Bounds)
+            .LocalBounds(LocalBounds)
+            //...
+            .PerObjectClipPlaneEnabled(bPerObjectClipPlaneEnabled) // we call the setters to fill the builder.
+            .PerObjectClipPlane(FVector4f(PerObjectClipPlane));
+    //...
+}
+`}
+  filename="PrimitiveSceneProxy.cpp"
+/>
 
+
+While building the actual parameters struct, we follow the same convention Unreal uses for the other bit flags: OR-ing the mask into <CodeInline>Flags</CodeInline> when the boolean is set.
+
+<CodeBlock
+  code={`
 struct FPrimitiveUniformShaderParametersBuilder
 {
-  .
-  .
-  .
-  inline const FPrimitiveUniformShaderParameters& Build()
-      {
-          //...
-          Parameters.Flags |= bAllowInstanceCullingOcclusionQueries ? PRIMITIVE_SCENE_DATA_FLAG_INSTANCE_CULLING_OCCLUSION_QUERIES: 0u;
-          Parameters.Flags |= bHasPixelAnimation ? PRIMITIVE_SCENE_DATA_FLAG_HAS_PIXEL_ANIMATION : 0u;
-          Parameters.Flags |= bRayTracingFarField ? PRIMITIVE_SCENE_DATA_FLAG_RAYTRACING_FAR_FIELD : 0u;
-          Parameters.Flags |= bRayTracingHasGroupId ? PRIMITIVE_SCENE_DATA_FLAG_RAYTRACING_HAS_GROUPID : 0u;
-          Parameters.Flags |= bPerObjectClipPlaneEnabled ? PRIMITIVE_SCENE_DATA_FLAG_PER_OBJECT_CLIP_PLANE_ENABLED : 0u; //<- Our flag
-          Parameters.Flags |= bHasPerClusterDisplacementFallbackRaster ? PRIMITIVE_SCENE_DATA_FLAG_PER_CLUSTER_DISPLACEMENT_FALLBACK_RASTER : 0u;
-          Parameters.Flags |= bIsFirstPersonPrimitive ? PRIMITIVE_SCENE_DATA_FLAG_IS_FIRST_PERSON_PRIMITIVE : 0u;
-          //...
-      }
-  .
-  .
-  .
+    //...
+    inline const FPrimitiveUniformShaderParameters& Build()
+    {
+        //...
+        Parameters.Flags |= bAllowInstanceCullingOcclusionQueries ? PRIMITIVE_SCENE_DATA_FLAG_INSTANCE_CULLING_OCCLUSION_QUERIES: 0u;
+        Parameters.Flags |= bHasPixelAnimation ? PRIMITIVE_SCENE_DATA_FLAG_HAS_PIXEL_ANIMATION : 0u;
+        Parameters.Flags |= bRayTracingFarField ? PRIMITIVE_SCENE_DATA_FLAG_RAYTRACING_FAR_FIELD : 0u;
+        Parameters.Flags |= bRayTracingHasGroupId ? PRIMITIVE_SCENE_DATA_FLAG_RAYTRACING_HAS_GROUPID : 0u;
+        Parameters.Flags |= bPerObjectClipPlaneEnabled ? PRIMITIVE_SCENE_DATA_FLAG_PER_OBJECT_CLIP_PLANE_ENABLED : 0u; //<- Our flag
+        Parameters.Flags |= bHasPerClusterDisplacementFallbackRaster ? PRIMITIVE_SCENE_DATA_FLAG_PER_CLUSTER_DISPLACEMENT_FALLBACK_RASTER : 0u;
+        Parameters.Flags |= bIsFirstPersonPrimitive ? PRIMITIVE_SCENE_DATA_FLAG_IS_FIRST_PERSON_PRIMITIVE : 0u;
+        //...
+    }
+    //...
 }
 `}
   filename="PrimitiveUniformShaderParameters.h"
 />
 
-### Packing and Unpacking
+### Packing
 
-After completing the the primitive uniform buffer data modification we need to do two more things before dealing with shaders and finally using the that we've carried this far; packing and unpacking.
-Even though we modified the uniform buffer we didn't changed how it gets packed before being sent to the GPU as well as its unpacking process at GPU side. Lets deal with one problem at a time.
+After completing the primitive uniform buffer modifications, two more things need to be done before dealing with the shaders and finally using the data we've carried this far: packing and unpacking.
+Even though we modified the uniform buffer structure, we haven't changed how it gets packed before being sent to the GPU, nor how it gets unpacked on the GPU side. Let's deal with one problem at a time.
 
-#### Packing
-
-With the current changes that we have made custom primitive float data is shifted by one <CodeInline>FVector4f</CodeInline> and we put per-object clip plane information into that place. We need to do the same
-with the packing process. <CodeInline>FPrimitiveSceneShaderData::Setup(const FPrimitiveUniformShaderParameters& PrimitiveUniformShaderParameters, FVector4f* RESTRICT OutData)</CodeInline> function gets called
-to serialize the primitive uniform shader parameters to a stream of <CodeInline>FVector4f</CodeInline>'s. Inspect the following code:
-
+With the changes we have made so far, the custom primitive data is shifted by one <CodeInline>FVector4f</CodeInline>, and we put the per-object clip plane information in the freed-up slot. We need to do the same
+in the packing process. The <CodeInline>FPrimitiveSceneShaderData::Setup(const FPrimitiveUniformShaderParameters& PrimitiveUniformShaderParameters, FVector4f* RESTRICT OutData)</CodeInline> function is called
+to serialize the primitive uniform shader parameters into a stream of <CodeInline>FVector4f</CodeInline>s. Inspect the following code:
 
 <CodeBlock
   code={`
-
-struct FPrimitiveUniformShaderParametersBuilder
+void FPrimitiveSceneShaderData::Setup(const FPrimitiveUniformShaderParameters& PrimitiveUniformShaderParameters, FVector4f* RESTRICT OutData)
 {
-  .
-  .
-  .
-  void FPrimitiveSceneShaderData::Setup(const FPrimitiveUniformShaderParameters& PrimitiveUniformShaderParameters, FVector4f* RESTRICT OutData)
-  {
     static_assert(NUM_LIGHTING_CHANNELS == 3, "The FPrimitiveSceneShaderData packing currently assumes a maximum of 3 lighting channels.");
 
     // Note: layout must match GetPrimitiveData in usf
 
     Store4(OutData, 0,
-      PrimitiveUniformShaderParameters.Flags,
-      PrimitiveUniformShaderParameters.InstanceSceneDataOffset,
-      PrimitiveUniformShaderParameters.NumInstanceSceneDataEntries,
-      (uint32)PrimitiveUniformShaderParameters.SingleCaptureIndex | ((PrimitiveUniformShaderParameters.VisibilityFlags & 0xFFFFu) << 16u));
+        PrimitiveUniformShaderParameters.Flags,
+        PrimitiveUniformShaderParameters.InstanceSceneDataOffset,
+        PrimitiveUniformShaderParameters.NumInstanceSceneDataEntries,
+        (uint32)PrimitiveUniformShaderParameters.SingleCaptureIndex | ((PrimitiveUniformShaderParameters.VisibilityFlags & 0xFFFFu) << 16u));
 
     Store4(OutData, 1,
-      PrimitiveUniformShaderParameters.PositionHigh.X,
-      PrimitiveUniformShaderParameters.PositionHigh.Y,
-      PrimitiveUniformShaderParameters.PositionHigh.Z,
-      PrimitiveUniformShaderParameters.PrimitiveComponentId);
+        PrimitiveUniformShaderParameters.PositionHigh.X,
+        PrimitiveUniformShaderParameters.PositionHigh.Y,
+        PrimitiveUniformShaderParameters.PositionHigh.Z,
+        PrimitiveUniformShaderParameters.PrimitiveComponentId);
 
     // Pack these matrices into the buffer as float3x4 transposed
     StoreTransposed(OutData, 2, PrimitiveUniformShaderParameters.LocalToRelativeWorld);
@@ -1273,421 +1186,262 @@ struct FPrimitiveUniformShaderParametersBuilder
     StoreTransposed(OutData, 8, PrimitiveUniformShaderParameters.PreviousLocalToRelativeWorld);
     StoreTransposed(OutData, 11, PrimitiveUniformShaderParameters.PreviousRelativeWorldToLocal);
     StoreTransposed(OutData, 14, PrimitiveUniformShaderParameters.WorldToPreviousWorld);
-    
-    .
-    .
-    .
+
+    //...
 
     Store4(OutData, 33,
-      PrimitiveUniformShaderParameters.MeshPaintTextureDescriptor.X,
-      PrimitiveUniformShaderParameters.MeshPaintTextureDescriptor.Y,
-      0u, 0u);
- 
+        PrimitiveUniformShaderParameters.MeshPaintTextureDescriptor.X,
+        PrimitiveUniformShaderParameters.MeshPaintTextureDescriptor.Y,
+        0u, 0u);
+
     // Set all the custom primitive data float4. This matches the loop in SceneData.ush
     const int32 CustomPrimitiveDataStartIndex = 34;
     for (int32 DataIndex = 0; DataIndex < FCustomPrimitiveData::NumCustomPrimitiveDataFloat4s; ++DataIndex)
     {
-      OutData[CustomPrimitiveDataStartIndex + DataIndex] = PrimitiveUniformShaderParameters.CustomPrimitiveData[DataIndex];
+        OutData[CustomPrimitiveDataStartIndex + DataIndex] = PrimitiveUniformShaderParameters.CustomPrimitiveData[DataIndex];
     }
-  }
 }
-  .
-  .
-  .
 `}
-  filename="PrimitiveUniformShaderParameters.h"
+  filename="PrimitiveUniformShaderParameters.cpp"
 />
 
-We need to change the function obove in a way that it passes our per-object clip plane information correctly. First of all we are going to put that information just before custom primitive floats are set
-as we did in the primitive uniform buffer. And later we should put our information to that memory chunk.
+Each <CodeInline>Store4</CodeInline> call writes four 32-bit values into the <CodeInline>FVector4f</CodeInline> at the given index. Notice that <CodeInline>Flags</CodeInline> is written as a whole into index 0,
+which means our new flag bit gets packed for free. The plane is a different story. We need to change the function above so that it writes our per-object clip plane information at index 34—right before the custom primitive floats,
+just as we did in the parameters struct—and move the custom primitive data one slot further.
 
 <CodeBlock
   code={`
-
-struct FPrimitiveUniformShaderParametersBuilder
+void FPrimitiveSceneShaderData::Setup(const FPrimitiveUniformShaderParameters& PrimitiveUniformShaderParameters, FVector4f* RESTRICT OutData)
 {
-  .
-  .
-  .
-  void FPrimitiveSceneShaderData::Setup(const FPrimitiveUniformShaderParameters& PrimitiveUniformShaderParameters, FVector4f* RESTRICT OutData)
-  {
-    
-    .
-    .
-    .
+    //...
 
     Store4(OutData, 33,
-      PrimitiveUniformShaderParameters.MeshPaintTextureDescriptor.X,
-      PrimitiveUniformShaderParameters.MeshPaintTextureDescriptor.Y,
-      0u, 0u);
+        PrimitiveUniformShaderParameters.MeshPaintTextureDescriptor.X,
+        PrimitiveUniformShaderParameters.MeshPaintTextureDescriptor.Y,
+        0u, 0u);
 
-    	Store4(OutData, 34
-      , PrimitiveUniformShaderParameters.PerObjectClipPlane.X
-      , PrimitiveUniformShaderParameters.PerObjectClipPlane.Y
-      , PrimitiveUniformShaderParameters.PerObjectClipPlane.Z
-      , PrimitiveUniformShaderParameters.PerObjectClipPlane.W);
+    // Our plane takes the 34th FVector4f
+    Store4(OutData, 34,
+        PrimitiveUniformShaderParameters.PerObjectClipPlane.X,
+        PrimitiveUniformShaderParameters.PerObjectClipPlane.Y,
+        PrimitiveUniformShaderParameters.PerObjectClipPlane.Z,
+        PrimitiveUniformShaderParameters.PerObjectClipPlane.W);
 
     // Set all the custom primitive data float4. This matches the loop in SceneData.ush
     const int32 CustomPrimitiveDataStartIndex = 35; // We changed the starting index from 34 to 35.
     for (int32 DataIndex = 0; DataIndex < FCustomPrimitiveData::NumCustomPrimitiveDataFloat4s; ++DataIndex)
     {
-      OutData[CustomPrimitiveDataStartIndex + DataIndex] = PrimitiveUniformShaderParameters.CustomPrimitiveData[DataIndex];
+        OutData[CustomPrimitiveDataStartIndex + DataIndex] = PrimitiveUniformShaderParameters.CustomPrimitiveData[DataIndex];
     }
-  }
 }
-  .
-  .
-  .
 `}
-  filename="PrimitiveUniformShaderParameters.h"
+  filename="PrimitiveUniformShaderParameters.cpp"
 />
 
-With that, packing process is completed. It is time to handle the unpacking process at the GPU side.
+With that, the packing process is complete. It is time to handle the unpacking process on the GPU side.
 
-All these information is unpacked to a strucutre called <CodeInline>FPrimitiveSceneData</CodeInline> (which is defined in <CodeInline>SceneData.ush</CodeInline> file). 
-This structure is a mirror of the primitive uniform shader parameters.  
+### Unpacking
 
-## unpacking
-
-The recent changes broke the renderer and it works incorrectly at the moment. With the current modifications
-made on <CodeInline>FPrimitiveUniformShaderParameters</CodeInline> we changed the structure of the information that is being send to the GPU and altered the packing behavior but 
-didn't changed the other side of the pipe, unpacking at the GPU.  
-Currently we are sending the <CodeInline>bPerObjectClipPlaneEnabled</CodeInline> flag as the LSB of the <CodeInline>Flags</CodeInline>
-parameter and <CodeInline>PerObjectClipPlane</CodeInline> as the last <CodeInline>FVecto4f</CodeInline> or the last 32 bits of the <CodeInline>FPrimitiveUniformShaderParameters</CodeInline> structure.
+The recent changes broke the renderer, and it currently behaves incorrectly. By modifying <CodeInline>FPrimitiveUniformShaderParameters</CodeInline>, we changed the structure of the information sent
+to the GPU and altered the packing behavior, but we didn't change the other side of the pipe: unpacking on the GPU.
+Currently, we are sending the <CodeInline>bPerObjectClipPlaneEnabled</CodeInline> flag as the most significant bit of the <CodeInline>Flags</CodeInline>
+parameter, and <CodeInline>PerObjectClipPlane</CodeInline> as the 34th <CodeInline>FVector4f</CodeInline> of the primitive's data.
 
 <p align="center">
-  <img src="/blog/implementing-per-object-clip-planes/Image_UnpackingCorruption.svg" alt="Plane"></img>
+  <img src="/blog/implementing-per-object-clip-planes/Image_UnpackingCorruption.svg" alt="Unpacking Corruption"></img>
 </p>
 
-Forgetting to unpacking the <CodeInline>bPerObjectClipPlaneEnabled</CodeInline> does not cause a lot of issues since it does not affect or shift the packing layout. It was an unused
-bit and since we didn't unpack it at the GPU side it is technically speaking still unused. But the real problem is <CodeInline>PerObjectClipPlane</CodeInline> parameter here. Since we
-put our parameter right before custom primitive floats data (for sake of simplicity) it shifts it off by one <CodeInline>FVectorf</CodeInline> and since we didn't cover it by changing the
-unpacking code it corrupts the whole custom primitive floats data. The first float secretly maps to our per object clip plane information and the first custom primitive float data
-can only be accessed through the second one and so on. 
-It is required to be fixed to complete out implementation and most importantly left the engine working after the implementation.
+Forgetting to unpack <CodeInline>bPerObjectClipPlaneEnabled</CodeInline> does not cause many issues, since it does not affect or shift the packing layout. It was an unused
+bit, and since we haven't unpacked it on the GPU side, it is technically still unused. The real problem is the <CodeInline>PerObjectClipPlane</CodeInline> parameter. Since we
+put our parameter right before the custom primitive data (for the sake of simplicity), it shifts that data by one <CodeInline>FVector4f</CodeInline>, and since the unpacking code has not been changed accordingly,
+it corrupts the whole custom primitive data. The first custom <CodeInline>float4</CodeInline> secretly maps to our per-object clip plane, the real first custom <CodeInline>float4</CodeInline>
+can only be accessed through the second one, and so on.
+This has to be fixed to complete our implementation and, most importantly, to leave the engine working after the implementation.
 
-We are going to start with <CodeInline>bPerObjectClipPlaneEnabled</CodeInline> but first it is reqiured to get some information about how GPU unpacks the data sent by the CPU.
-
-
-<CodeInline>FPrimitiveSceneData</CodeInline> is the GPU correspondance of the FPrimitiveSceneShaderData sent by the GPU. The packed contents gets unpacket to a <CodeInline>FPrimitiveSceneData</CodeInline> instance.
-This is done by calling <CodeInline>GetPrimiveData</CodeInline> it with an integet argument named as <CodeInline>PrimitiveID</CodeInline> indicating which primitive to get the primitive data of. 
-To make packing and unpacking compatible it is required to extent <CodeInline>FPrimitiveSceneData</CodeInline> as <CodeInline>FPrimitiveUniformShaderParameters</CodeInline>. 
+All this information is unpacked into a structure called <CodeInline>FPrimitiveSceneData</CodeInline> (defined in the <CodeInline>SceneData.ush</CodeInline> file), which contains everything about a primitive on the GPU side.
+It can be thought of as the GPU representation of a primitive proxy, which in turn is the render thread representation of a primitive component.
+The unpacking is done by calling <CodeInline>GetPrimitiveData</CodeInline> with an integer argument named <CodeInline>PrimitiveId</CodeInline>, indicating which primitive's data to fetch.
+To keep packing and unpacking compatible, <CodeInline>FPrimitiveSceneData</CodeInline> has to be extended just like <CodeInline>FPrimitiveUniformShaderParameters</CodeInline>.
 
 <CodeBlock
   code={`
 struct FPrimitiveSceneData
 {
-	uint		Flags;
-	uint		VisibilityFlags;
-	int			InstanceSceneDataOffset; // Link to the range of instances that belong to this primitive
-	int			NumInstanceSceneDataEntries;
-	int			PersistentPrimitiveIndex;
-	uint		SingleCaptureIndex; // TODO: Use 16 bits? 8 bits?
-	float3		PositionHigh;
-	uint		PrimitiveComponentId; // TODO: Refactor to use PersistentPrimitiveIndex, ENGINE USE ONLY - will be removed
-	FDFMatrix	LocalToWorld;
-	FDFInverseMatrix WorldToLocal;
-	FDFMatrix	PreviousLocalToWorld;
-	FDFInverseMatrix PreviousWorldToLocal;
-	float4x4	WorldToPreviousWorld; // NOTE: Intentionally not LWC
-	float3		InvNonUniformScale;
-	float		ObjectBoundsX;
-	FDFVector3	ObjectWorldPosition;
-	FDFVector3	ActorWorldPosition;
-	float		MinMaterialDisplacement;
-	float		MaxMaterialDisplacement;
-#if PRIMITIVE_HAS_TILEOFFSET_DATA
-	FLWCVector3	ObjectWorldPositionTO;
-	FLWCVector3	ActorWorldPositionTO;
-#endif
-	float		ObjectRadius;
-	uint		LightmapUVIndex;   // TODO: Use 16 bits? // TODO: Move into associated array that disappears if static lighting is disabled
-	float3		ObjectOrientation; // TODO: More efficient representation?
-	uint		LightmapDataIndex; // TODO: Use 16 bits? // TODO: Move into associated array that disappears if static lighting is disabled
-	float4		NonUniformScale;
-	float3		PreSkinnedLocalBoundsMin;
-	uint		NaniteResourceID;
-	float3		PreSkinnedLocalBoundsMax;
-	uint		NaniteHierarchyOffset;
-	float3		LocalObjectBoundsMin;
-	float		ObjectBoundsY;
-	float3		LocalObjectBoundsMax;
-	float		ObjectBoundsZ;
-	uint		InstancePayloadDataOffset;
-	uint		InstancePayloadDataStride;
-	uint		InstancePayloadExtensionSize;
-	float3		InstanceLocalBoundsCenter;
-	float3		InstanceLocalBoundsExtent;
-	float3		WireframeColor; // TODO: Should refactor out all editor data into a separate buffer
-	float3		PrimitiveColor; // TODO: Should refactor out all editor data into a separate buffer
-	uint		PackedNaniteFlags;
-	float2 		InstanceDrawDistanceMinMaxSquared;
-	float		InstanceWPODisableDistanceSquared;
-	uint		NaniteRayTracingDataOffset;
-	float		MaxWPOExtent;
-	uint		CustomStencilValueAndMask;
-	float		PixelProgrammableDistanceSquared;
-	float		MaterialDisplacementFadeOutSize;
-	uint2		MeshPaintTextureDescriptor;
-	float4		CustomPrimitiveData[NUM_CUSTOM_PRIMITIVE_DATA]; // TODO: Move to associated array to shrink primitive data and pack cachelines more effectively
+    uint        Flags;
+    uint        VisibilityFlags;
+    int         InstanceSceneDataOffset; // Link to the range of instances that belong to this primitive
+    int         NumInstanceSceneDataEntries;
+    int         PersistentPrimitiveIndex;
+    uint        SingleCaptureIndex; // TODO: Use 16 bits? 8 bits?
+    float3      PositionHigh;
+    uint        PrimitiveComponentId; // TODO: Refactor to use PersistentPrimitiveIndex, ENGINE USE ONLY - will be removed
+    FDFMatrix   LocalToWorld;
+    FDFInverseMatrix WorldToLocal;
+    FDFMatrix   PreviousLocalToWorld;
+    FDFInverseMatrix PreviousWorldToLocal;
+    float4x4    WorldToPreviousWorld; // NOTE: Intentionally not LWC
+    //...
+    uint        NaniteRayTracingDataOffset;
+    float       MaxWPOExtent;
+    uint        CustomStencilValueAndMask;
+    float       PixelProgrammableDistanceSquared;
+    float       MaterialDisplacementFadeOutSize;
+    uint2       MeshPaintTextureDescriptor;
+    float4      PerObjectClipPlane; // Here is the variable that we allocate to store the clip plane information
+    float4      CustomPrimitiveData[NUM_CUSTOM_PRIMITIVE_DATA]; // TODO: Move to associated array to shrink primitive data and pack cachelines more effectively
 };
 `}
   filename="SceneData.ush"
 />
 
+#### Unpacking the Enabled Flag
 
+Let's start with the trivial one, <CodeInline>bPerObjectClipPlaneEnabled</CodeInline>. The flag is already in place as the last bit of the <CodeInline>Flags</CodeInline> variable, since the whole
+32-bit value is unpacked as-is.
+The general convention the engine follows to read flags is to provide a set of getter functions that perform the same bit operations we used to store the information
+in the <CodeInline>Flags</CodeInline> parameter in the first place. The reason the engine does not unpack those bits into individual boolean fields is, you guessed it, memory efficiency.
 
-<CodeInline>bPerObjectClipPlaneEnabled</CodeInline>
-flag is already in place as the last bit of the <CodeInline>Flags</CodeInline> variable. But that is not the same with <CodeInline>PerObjectClipPlane</CodeInline>. CPU side packes that variable as the 34.th 
-<CodeInline>34.th</CodeInline> of the buffer but the GPU side of the code simply omits it and starts unpacking the custom primitive floats from that index. Before changing this behavior it is required to has 
-a variable in <CodeInline>FPrimitiveSceneData</CodeInline> so that we can put the clip plane information into that variale while unpacking the data stream.  
-
-
-<CodeBlock
-  code={`
-struct FPrimitiveSceneData
-{
-	uint		Flags;
-	uint		VisibilityFlags;
-	.
-  .
-  .
-	uint2		MeshPaintTextureDescriptor;
-  float4		PerObjectClipPlane; // Here is the variable that we allocate to store clip plane the information
-	float4		CustomPrimitiveData[NUM_CUSTOM_PRIMITIVE_DATA]; // TODO: Move to associated array to shrink primitive data and pack cachelines more effectively
-};
-`}
-  filename="SceneData.ush"
-/>
-
-Extending the <CodeInline>FPrimitiveSceneData</CodeInline> was fairly easy. Let us get to unpacking process to that we can correctly unpack the clip plane information starting with the unpacking function 
-<CodeInline>GetPrimitiveSceneData</CodeInline>
-
-All shaders uses <CodeInline>GetPrimiveData(uint PrimiveID)</CodeInline> to get acess to t
-
-
-Lets start with the trivial one <CodeInline>bPerObjectClipPlaneEnabled</CodeInline>. On GPU all the packed data sent via <CodeInline>FPrimitiveUniformShaderParameters</CodeInline> 
-is unpacked to another struct called <CodeInline>FPrimitiveSceneData</CodeInline> which contains all the information about a primitive on the GPU side. I can be thought as the GPU representation
-of a primtive proxy which is the rendering thread representation of a primitive component. 
-The general convention that the engine follows to read the flags is to provide a set of getter functions which performs bit flag operations just like the ones we did to store the information
-into the <CodeInline>Flags</CodeInline> parameter in the first place. The reason that the engine does not unpack those bits to its individual boolean flags is , you guessed it, memory efficiency.
-
-So we are going to do the same. I highly encourage you to check the code written by the engine to learn about how the handle this situation.
+So we are going to do the same. I highly encourage you to check the code written by the engine to learn how it handles the other flags.
 
 <CodeBlock
   code={`
-
 /*
-* This function is going to return -1 or 1 based on whether the per-object clip plane is disabled or enabled respectively.
-* @param Flags Takes the flags parameter of a FPrimitiveSceneData instance
+* Returns true if the per-object clip plane is enabled on the primitive.
+* @param Flags Takes the Flags parameter of an FPrimitiveSceneData instance
 */
-float GetPrimitive_PerObjectClipPlaneEnabledSign(uint Flags)
+bool GetPrimitive_PerObjectClipPlaneEnabled_FromFlags(uint Flags)
 {
-  //Notice that the same bitmask macro is used here.
-  return CondMask(Flags & PRIMITIVE_SCENE_DATA_FLAG_PER_OBJECT_CLIP_PLANE_ENABLED, -1.f, 1.0f);
+    //Notice that the same bitmask macro is used here.
+    return (Flags & PRIMITIVE_SCENE_DATA_FLAG_PER_OBJECT_CLIP_PLANE_ENABLED) != 0u;
 }
 
-//An function that does the same thing but with using a primitive ID. Primitive ID's uniquely defines a primtive
-//It is acutally index of the primitive inside of the Data stream that we sent to the GPU.
-float GetPrimitive_PerObjectClipEnabledPlaneSign(uint PrimitiveID)
+//A function that does the same thing but using a primitive ID. Primitive IDs uniquely identify a primitive;
+//it is actually the index of the primitive inside the data stream that we sent to the GPU.
+bool GetPrimitive_PerObjectClipPlaneEnabled(uint PrimitiveId)
 {
-	return GetPrimitive_PerObjectClipPlaneEnabledSign_FromFlags(GetPrimitiveData(PrimitiveID).Flags);
+    return GetPrimitive_PerObjectClipPlaneEnabled_FromFlags(GetPrimitiveData(PrimitiveId).Flags);
 }
-
 `}
   filename="SceneData.ush"
 />
 
-That is it. From know on we can fully utilize <CodeInline>bPerObjectClipPlaneEnabled</CodeInline> parameter on the GPU side.
+That is it. From now on, we can fully utilize the <CodeInline>bPerObjectClipPlaneEnabled</CodeInline> parameter on the GPU side.
 
-It is time to do the same for the <CodeInline>PerObjectClipPlane</CodeInline>.
-Like we did while packing the data we need to alter the unpacking proccess. First of all it is required to allocate some place for our variable inside <CodeInline>FPrimitiveSceneData</CodeInline>
-data. We are going to place it the same location right before the <CodeInline>CustomPrimiveData</CodeInline>.
+#### Unpacking the Clip Plane
 
-<CodeBlock
-  code={`
-struct FPrimitiveSceneData
-{
-	uint		Flags;
-	uint		VisibilityFlags;
-	int			InstanceSceneDataOffset; // Link to the range of instances that belong to this primitive
-	int			NumInstanceSceneDataEntries;
-	int			PersistentPrimitiveIndex;
-	uint		SingleCaptureIndex; // TODO: Use 16 bits? 8 bits?
-	float3		PositionHigh;
-	uint		PrimitiveComponentId; // TODO: Refactor to use PersistentPrimitiveIndex, ENGINE USE ONLY - will be removed
-	FDFMatrix	LocalToWorld;
-	FDFInverseMatrix WorldToLocal;
-	FDFMatrix	PreviousLocalToWorld;
-	FDFInverseMatrix PreviousWorldToLocal;
-	float4x4	WorldToPreviousWorld; // NOTE: Intentionally not LWC
-	float3		InvNonUniformScale;
-	float		ObjectBoundsX;
-	FDFVector3	ObjectWorldPosition;
-	FDFVector3	ActorWorldPosition;
-	float		MinMaterialDisplacement;
-	float		MaxMaterialDisplacement;
-#if PRIMITIVE_HAS_TILEOFFSET_DATA
-	FLWCVector3	ObjectWorldPositionTO;
-	FLWCVector3	ActorWorldPositionTO;
-#endif
-	float		ObjectRadius;
-	uint		LightmapUVIndex;   // TODO: Use 16 bits? // TODO: Move into associated array that disappears if static lighting is disabled
-	float3		ObjectOrientation; // TODO: More efficient representation?
-	uint		LightmapDataIndex; // TODO: Use 16 bits? // TODO: Move into associated array that disappears if static lighting is disabled
-	float4		NonUniformScale;
-	float3		PreSkinnedLocalBoundsMin;
-	uint		NaniteResourceID;
-	float3		PreSkinnedLocalBoundsMax;
-	uint		NaniteHierarchyOffset;
-	float3		LocalObjectBoundsMin;
-	float		ObjectBoundsY;
-	float3		LocalObjectBoundsMax;
-	float		ObjectBoundsZ;
-	uint		InstancePayloadDataOffset;
-	uint		InstancePayloadDataStride;
-	uint		InstancePayloadExtensionSize;
-	float3		InstanceLocalBoundsCenter;
-	float3		InstanceLocalBoundsExtent;
-	float3		WireframeColor; // TODO: Should refactor out all editor data into a separate buffer
-	float3		PrimitiveColor; // TODO: Should refactor out all editor data into a separate buffer
-	uint		PackedNaniteFlags;
-	float2 		InstanceDrawDistanceMinMaxSquared;
-	float		InstanceWPODisableDistanceSquared;
-	uint		NaniteRayTracingDataOffset;
-	float		MaxWPOExtent;
-	uint		CustomStencilValueAndMask;
-	float		PixelProgrammableDistanceSquared;
-	float		MaterialDisplacementFadeOutSize;
-	uint2		MeshPaintTextureDescriptor;
-	float4		PerObjectClipPlane; // Our data
-	float4		CustomPrimitiveData[NUM_CUSTOM_PRIMITIVE_DATA]; // TODO: Move to associated array to shrink primitive data and pack cachelines more effectively
-};
-`}
-  filename="SceneData.ush"
-/>
-
-
-We put the data at the 34.th <CodeInline>FVector4f</CodeInline> on the CPU side and shift the <CodeInline>CustomPrimitiveData</CodeInline> data by one <CodeInline>FVector4f</CodeInline> to 
-get enough room for that adustment. We are going to follow the same logic here. 
+It is time to do the same for <CodeInline>PerObjectClipPlane</CodeInline>. We put the data at the 34th <CodeInline>FVector4f</CodeInline> on the CPU side and shifted the <CodeInline>CustomPrimitiveData</CodeInline> by one <CodeInline>FVector4f</CodeInline> to
+make room for it. We are going to follow the same logic in <CodeInline>GetPrimitiveData</CodeInline>.
 
 <CodeBlock
   code={`
-
 // Fetch from scene primitive buffer
 FPrimitiveSceneData GetPrimitiveData(uint PrimitiveId)
 {
 #if SHADER_USES_PRIMITIVE_UBO
-	#if USE_INSTANCE_CULLING
-		return GetPrimitiveDataFromUniformBuffer();
-	#else
-		return LoadPrimitiveDataUBO(PrimitiveId);
-	#endif
+    #if USE_INSTANCE_CULLING
+        return GetPrimitiveDataFromUniformBuffer();
+    #else
+        return LoadPrimitiveDataUBO(PrimitiveId);
+    #endif
 #elif (VERTEXSHADER && !PLATFORM_SUPPORTS_VERTEX_SHADER_SRVS)
-	// Vertex shaders may not have access to GPUScene on mobile. Use GetPrimitiveData(FVertexFactoryIntermediates Intermediates)
-	// TODO: need a way to report invalid usage, after all dead code elimination
-	return (FPrimitiveSceneData)0;
+    // Vertex shaders may not have access to GPUScene on mobile. Use GetPrimitiveData(FVertexFactoryIntermediates Intermediates)
+    // TODO: need a way to report invalid usage, after all dead code elimination
+    return (FPrimitiveSceneData)0;
 #else
-	FPrimitiveSceneData PrimitiveData = (FPrimitiveSceneData)0;
-	// Note: layout must match FPrimitiveSceneShaderData in C++
-	// Relying on optimizer to remove unused loads
-	uint PrimitiveIndex = PrimitiveId * PRIMITIVE_SCENE_DATA_STRIDE;
-	
-	float3 PositionHigh = LoadPrimitivePrimitiveSceneDataElement(PrimitiveIndex, 1).xyz;
+    FPrimitiveSceneData PrimitiveData = (FPrimitiveSceneData)0;
+    // Note: layout must match FPrimitiveSceneShaderData in C++
+    // Relying on optimizer to remove unused loads
+    uint PrimitiveIndex = PrimitiveId * PRIMITIVE_SCENE_DATA_STRIDE;
 
-	const float4x4 LocalToWorld = transpose(float4x4(
-		LoadPrimitivePrimitiveSceneDataElement(PrimitiveIndex, 2),
-		LoadPrimitivePrimitiveSceneDataElement(PrimitiveIndex, 3),
-		LoadPrimitivePrimitiveSceneDataElement(PrimitiveIndex, 4),
-		float4(0, 0, 0, 1)
-	));
+    float3 PositionHigh = LoadPrimitivePrimitiveSceneDataElement(PrimitiveIndex, 1).xyz;
+    //...
+    PrimitiveData.CustomStencilValueAndMask         = asuint(LoadPrimitivePrimitiveSceneDataElement(PrimitiveIndex, 32).y);
+    PrimitiveData.PixelProgrammableDistanceSquared  = LoadPrimitivePrimitiveSceneDataElement(PrimitiveIndex, 32).z;
+    PrimitiveData.MaterialDisplacementFadeOutSize   = LoadPrimitivePrimitiveSceneDataElement(PrimitiveIndex, 32).w;
+    PrimitiveData.MeshPaintTextureDescriptor        = asuint(LoadPrimitivePrimitiveSceneDataElement(PrimitiveIndex, 33).xy);
 
-	const float4x4 PreviousLocalToWorld = transpose(float4x4(
-		LoadPrimitivePrimitiveSceneDataElement(PrimitiveIndex, 8),
-		LoadPrimitivePrimitiveSceneDataElement(PrimitiveIndex, 9),
-		LoadPrimitivePrimitiveSceneDataElement(PrimitiveIndex, 10),
-		float4(0, 0, 0, 1)
-	));
+    PrimitiveData.PerObjectClipPlane                = LoadPrimitivePrimitiveSceneDataElement(PrimitiveIndex, 34); // We read from the 34th float4
+    // NOTE: Please make sure GetPrimitiveDataFromUniformBuffer() gets updated as well when adding new members here
 
-	.
-  .
-  .
-	PrimitiveData.CustomStencilValueAndMask				= asuint(LoadPrimitivePrimitiveSceneDataElement(PrimitiveIndex, 32).y);
-	PrimitiveData.PixelProgrammableDistanceSquared		= LoadPrimitivePrimitiveSceneDataElement(PrimitiveIndex, 32).z;
-	PrimitiveData.MaterialDisplacementFadeOutSize		= LoadPrimitivePrimitiveSceneDataElement(PrimitiveIndex, 32).w;
-	PrimitiveData.MeshPaintTextureDescriptor			= asuint(LoadPrimitivePrimitiveSceneDataElement(PrimitiveIndex, 33).xy);
-
-	PrimitiveData.PerObjectClipPlane                    = LoadPrimitivePrimitiveSceneDataElement(PrimitiveIndex, 34).xyzw; // We read from 34.th float
-	// NOTE: Please make sure GetPrimitiveDataFromUniformBuffer() gets updated as well when adding new members here
-
-	// TODO: Move to associated array (and editor data) to shrink primitive data and better pack cachelines
-	UNROLL
-	for (uint DataIndex = 0; DataIndex < NUM_CUSTOM_PRIMITIVE_DATA; ++DataIndex)
-	{
-		// old code PrimitiveData.CustomPrimitiveData[DataIndex] = LoadPrimitivePrimitiveSceneDataElement(PrimitiveIndex,  34 + DataIndex); // we shifted it by one.
-		PrimitiveData.CustomPrimitiveData[DataIndex] = LoadPrimitivePrimitiveSceneDataElement(PrimitiveIndex,  35 + DataIndex);
-	}
-	return PrimitiveData;
+    // TODO: Move to associated array (and editor data) to shrink primitive data and better pack cachelines
+    UNROLL
+    for (uint DataIndex = 0; DataIndex < NUM_CUSTOM_PRIMITIVE_DATA; ++DataIndex)
+    {
+        // old code: LoadPrimitivePrimitiveSceneDataElement(PrimitiveIndex, 34 + DataIndex); we shifted it by one.
+        PrimitiveData.CustomPrimitiveData[DataIndex] = LoadPrimitivePrimitiveSceneDataElement(PrimitiveIndex, 35 + DataIndex);
+    }
+    return PrimitiveData;
 #endif
 }
 `}
   filename="SceneData.ush"
 />
 
+Notice that the stride we incremented earlier shows up here: <CodeInline>PrimitiveId * PRIMITIVE_SCENE_DATA_STRIDE</CodeInline> is how the GPU finds where a primitive's data begins. Had we not updated it, every primitive after
+the first one would be read from the wrong offset.
 
-## Step 4: The Finishing Touch—Shader Modifications (HLSL Stage)
-
-At this point the clip plane lives in GPU memory, patiently waiting to do its job. The CPU side of the house is in order; what remains is teaching the vertex shader to read that packed data and write a clip distance the rasterizer understands. This is where our earlier dot-product math pays off—we already know exactly what value to emit.
-
-### Intercepting Primitive Data in SceneData.ush
-
-Unreal centralizes per-primitive fetches in <CodeInline>SceneData.ush</CodeInline>. Any shader that calls <CodeInline>GetPrimitiveData</CodeInline> expects a stable layout: the flag bit we claimed in <CodeInline>SceneDefinitions.h</CodeInline> and the float4 at stride index 34 must be mirrored here so HLSL sees the same contract the C++ <CodeInline>Setup()</CodeInline> function wrote. We extend the struct and accessor helpers so materials and vertex factories can query <CodeInline>PerObjectClipPlane</CodeInline> without bespoke uniform slots.
-
-<br></br>
-
-*(Shader-side struct and accessor changes for <CodeInline>SceneData.ush</CodeInline>—to be documented in the next pass.)*
-
-### Injecting the Clip Distance into the Vertex Shader (PositionShader.usf)
-
-Finally, the vertex shader must output the hardware clip distance when the per-object flag is set—typically a second clip distance index so the engine's global plane keeps its slot. In <CodeInline>PositionShader.usf</CodeInline> (and the relevant vertex factory paths), we evaluate the same dot product derived in the math section, guard it behind the flag bitmask, and assign the result to the appropriate <CodeInline>OutClipDistance</CodeInline> semantic. Flip the normal if your art direction wants the opposite half-space clipped; the math does not care, but your level designers might.
-
-<br></br>
-
-*(Vertex shader clip-distance output—<CodeInline>PositionShader.usf</CodeInline> modifications to be documented in the next pass.)*
-
-# Updating The Shaders
-Everything up to this point served a single purpose: sending our per-object clip plane data to the GPU. Now, it's time to update the shaders to perform the actual vertex culling.
-
-We designed our per-object clip plane as an extension of Unreal's existing global clip plane. That architectural choice pays off here: instead of deriving a custom code path
-(though you are free to do so in your own implementation), we can simply inject our logic directly into any existing code path related to the global clip plane. 
-
-But before it is required so have a short information about how clip distances and other system variables are handled by the engine.
-
-System variables are special variables defined by graphics APIs that can alter different aspects of the execution. Each graphics API defines a different set of system varialbes which makes it
-API dependent. To solve the dependency Unreal Engine Puts an abstraction layer on top of that by defining its own variables that maps to those system variables. To indicate that spesific variables
-Unreal puts <CodeInline>SV_</CodeInline> prefix to their names.
-
-As you may already guessed clip distances are one of those variables and different graphics APIs defines a different number of clip distance variables. Luckly every API defines enough number of clip distances
-for our implementation. Unreal utilizes the first clip distance variable <CodeInline>SV_ClipDistance</CodeInline> for global clip planes. <CodeInline>SV_ClipDistance</CodeInline> value is modified by several 
-vertex shaders, but the code below displays the common pattern shared by all the shaders.
+The comment left by the engine developers deserves attention as well. Some shaders do not read the GPU Scene stream at all, but bind the primitive's <CodeInline>FPrimitiveUniformShaderParameters</CodeInline>
+directly as a uniform buffer (named <CodeInline>Primitive</CodeInline> in HLSL). In that path the fields are copied one by one, so our new member has to be copied too.
 
 <CodeBlock
   code={`
-  void Pass (
-    ...
+FPrimitiveSceneData GetPrimitiveDataFromUniformBuffer()
+{
+    FPrimitiveSceneData PrimitiveData = (FPrimitiveSceneData)0;
+    PrimitiveData.Flags = Primitive.Flags;
+    //...
+    PrimitiveData.MeshPaintTextureDescriptor = Primitive.MeshPaintTextureDescriptor;
+    PrimitiveData.PerObjectClipPlane = Primitive.PerObjectClipPlane; // Our data
+    //...
+    return PrimitiveData;
+}
+`}
+  filename="SceneData.ush"
+/>
+
+<Notification emoji="⚠️">
+Depending on the engine version, <CodeInline>LoadPrimitiveDataUBO</CodeInline> may also read the packed layout with hardcoded indices. If it does, apply the same 34/35 shift there.
+Every place that reads the primitive layout has to agree with the packing code; a single missed spot silently corrupts custom primitive data.
+</Notification>
+
+With both sides of the pipe agreeing on the layout again, custom primitive data is back to normal, and every shader can query a primitive's per-object clip plane state.
+
+## Updating The Shaders
+Everything up to this point served a single purpose: sending our per-object clip plane data to the GPU. Now it is time to update the shaders to perform the actual clipping.
+
+We designed our per-object clip plane as an extension of Unreal's existing global clip plane. That architectural choice pays off here: instead of deriving a custom code path
+(though you are free to do so in your own implementation), we can simply inject our logic directly into the existing code paths related to the global clip plane.
+
+But before that, a short explanation of how clip distances and other system values are handled by the engine is required.
+
+System values are special variables defined by graphics APIs that can alter different aspects of the pipeline's execution. Each graphics API defines its own set of system values, which makes them
+API dependent. HLSL marks them with semantics carrying an <CodeInline>SV_</CodeInline> prefix, and Unreal's shader compiler translates those semantics into the equivalent built-ins of the target API,
+so the same shader code works on every platform.
+
+As you may have already guessed, clip distances are one of those system values, and different graphics APIs define a different number of clip distance slots. Luckily, every API defines enough of them
+for our implementation. Unreal utilizes the first clip distance, <CodeInline>SV_ClipDistance</CodeInline> (which is shorthand for <CodeInline>SV_ClipDistance0</CodeInline>), for the global clip plane. <CodeInline>SV_ClipDistance</CodeInline> is written by several
+vertex shaders, but the code below displays the common pattern shared by all of them.
+
+<CodeBlock
+  code={`
+void Main(
+    //...
 #if USE_GLOBAL_CLIP_PLANE
-	  out float OutGlobalClipPlaneDistance : SV_ClipDistance // This means that the value of the variable OutGlobalClipPlaneDistance is written into SV_ClipDistance at the end of the function
+    , out float OutGlobalClipPlaneDistance : SV_ClipDistance // The value of OutGlobalClipPlaneDistance is written into SV_ClipDistance at the end of the function
 #endif
-    ...
-  )
-  {
-    ... //Modification happens here.
-  }
+    //...
+    )
+{
+    //... Modification happens here.
+}
 `}
   filename=""
 />
 
-As said before several shaders manipulates <CodeInline>SV_ClipDistance</CodeInline> variable. As of Unreal Engine 5.8 these are the shader files which contains a vertex shader which manipulates (writes) it.
+<CodeInline>USE_GLOBAL_CLIP_PLANE</CodeInline> is only defined when global clip plane support is enabled in the project settings (<CodeInline>r.AllowGlobalClipPlane</CodeInline>), which is why our component
+property comments mention that console variable. Since our output lives inside the same preprocessor block, the feature carries the same requirement.
+
+As said before, several shaders write to <CodeInline>SV_ClipDistance</CodeInline>. As of Unreal Engine 5.8, these are the shader files containing a vertex shader that writes it:
 
 * <CodeInline>AnisotropyPassShader.usf</CodeInline>
 * <CodeInline>BasePassVertexShader.usf</CodeInline>
@@ -1703,111 +1457,190 @@ As said before several shaders manipulates <CodeInline>SV_ClipDistance</CodeInli
 * <CodeInline>ShadowDepthVertexShader.usf</CodeInline>
 * <CodeInline>VelocityShader.usf</CodeInline>
 
-We are going to allocate the next available clip distance variable <CodeInline>SV_ClipDistance1</CodeInline> and use it to extent the functionality defined in those shader files above, like the following.
+It is important to cover all of them, not just the base pass. If, for example, the depth-only or shadow depth passes are left untouched, the clipped part of the object will disappear from the
+color buffer but still write depth and cast shadows.
+
+We are going to allocate the next available clip distance, <CodeInline>SV_ClipDistance1</CodeInline>, and use it to extend the functionality defined in the shader files above, like the following:
 
 <CodeBlock
   code={`
-  void Pass (
-    ...
+void Main(
+    //...
 #if USE_GLOBAL_CLIP_PLANE
-	  out float OutGlobalClipPlaneDistance : SV_ClipDistance 
-	  out float OutPerObjectClipPlaneDistance : SV_ClipDistance1
+    , out float OutGlobalClipPlaneDistance : SV_ClipDistance
+    , out float OutPerObjectClipPlaneDistance : SV_ClipDistance1
 #endif
-    ...
-  )
-  {
-    ...
-  }
+    //...
+    )
+{
+    //...
+}
 `}
   filename=""
 />
 
-Before injecting our custom calculation to those shaders let us inspect how unreal handles global clip plane. The following code snipped is from <CodeInline>AnisotropyPassShader.usf</CodeInline>
-shader, the logic is almost the same with the other shaders.
+Before injecting our custom calculation into those shaders, let us inspect how Unreal handles the global clip plane. The following code snippet is from the <CodeInline>AnisotropyPassShader.usf</CodeInline>
+shader; the logic is almost the same in the other shaders.
 
 <CodeBlock
   code={`
-  void MainVertexShader(
-	    FVertexFactoryInput Input,
-	    out FVertexOutput Output 
+void MainVertexShader(
+    FVertexFactoryInput Input,
+    out FVertexOutput Output
 #if USE_GLOBAL_CLIP_PLANE
-	    , out float OutGlobalClipPlaneDistance : SV_ClipDistance
+    , out float OutGlobalClipPlaneDistance : SV_ClipDistance
 #endif
 #if INSTANCED_STEREO
-	    , out uint ViewportIndex : SV_ViewPortArrayIndex
+    , out uint ViewportIndex : SV_ViewPortArrayIndex
 #endif
-	)
-  {
-    ...
+    )
+{
+    //...
 #if USE_GLOBAL_CLIP_PLANE
-		OutGlobalClipPlaneDistance = dot(ResolvedView.GlobalClippingPlane, float4(WorldPos.xyz, 1));
+    OutGlobalClipPlaneDistance = dot(ResolvedView.GlobalClippingPlane, float4(WorldPos.xyz, 1));
 #endif
-  }
+}
 `}
-  filename="PrimitiveComponent.h"
+  filename="AnisotropyPassShader.usf"
 />
 
-Engine calculates the clip plane distance as it is explained in this blog page, the dot product of the plane in it special form and the augmented query point. 
-We are going to execute a similar calculation, inspect the below.
+The engine calculates the clip distance exactly as explained earlier in this post: the dot product of the plane in its compact form and the homogeneous query point.
+We are going to execute a similar calculation. Inspect the following:
 
 <CodeBlock
   code={`
-  void MainVertexShader(
-	    FVertexFactoryInput Input,
-	    out FVertexOutput Output 
+{ //Function body
+    //...
 #if USE_GLOBAL_CLIP_PLANE
-	    , out float OutGlobalClipPlaneDistance : SV_ClipDistance
-#endif
-#if INSTANCED_STEREO
-	    , out uint ViewportIndex : SV_ViewPortArrayIndex
-#endif
-	)
-  { //Function body
-    ...
-#if USE_GLOBAL_CLIP_PLANE
-
     OutGlobalClipPlaneDistance = dot(ResolvedView.GlobalClippingPlane, float4(WorldPos.xyz, 1));
 
     //0.0f means that the vertex is on the plane and should be rendered
-    OutPerObjectClipPlaneDistance = bPerObjectClipPlaneEnabledForTheObject ? dot(ObjectClipPlane, float4(VertexPos, 1)) : 0.0f; 
+    OutPerObjectClipPlaneDistance = bPerObjectClipPlaneEnabled ? dot(PerObjectClipPlane, float4(VertexPos, 1)) : 0.0f;
 #endif
-  }
+}
 `}
   filename=""
 />
 
-Implementation is simple and easy to understand, if per-object clip plane is enabled on the object manipulate out clip distance value as the distance from the per-object clip plane, zero otherwise which indicating no clipping.
-The only thing the holds us back from actually extending every shader that manipulates <CodeInline>SV_ClipDistance</CodeInline> and update their function body like above 
-is the absense of the information coveyed by these three variables <CodeInline>bPerObjectClipPlaneEnabled</CodeInline>, <CodeInline>ClipPlane</CodeInline>, and <CodeInline>VertexPos</CodeInline>.
+The implementation is simple and easy to understand: if the per-object clip plane is enabled on the object, the output clip distance is the signed distance from the per-object clip plane; otherwise it is zero, indicating no clipping.
+The only thing holding us back from extending every shader that writes <CodeInline>SV_ClipDistance</CodeInline> is
+the absence of the information conveyed by three variables: <CodeInline>bPerObjectClipPlaneEnabled</CodeInline>, <CodeInline>PerObjectClipPlane</CodeInline>, and <CodeInline>VertexPos</CodeInline>.
 
-<CodeInline>VertexPos</CodeInline> is a good starting point since it is the easiest one any requires so little effort. Let us tackle that first before getting to the real challange. 
-Initially one might think to use the <CodeInline>WorldPos</CodeInline> as the <CodeInline>VertexPos</CodeInline> as it is being used in global clip plane calculation.
-Even though it is partially correct it is not the right answer. <CodeInline>WorldPos</CodeInline> variable contains the position of the vertex relative to the camera position in the world.
-It makes sense since global clip plane is actually computed relatively to the camera position. When global clip plane is far way 1000 units it doesn't indicate a world position it
-indicates the object whose distance from the camera is greater than 1000 untits are clipped. 
-We need to convert it into actual world space position of the vertex before using it in our calculation.
+### The Vertex Position
 
-Calculation is trivial, it is only required to add the camera world position to the <CodeInline>WorldPosition</CodeInline>.
+<CodeInline>VertexPos</CodeInline> is a good starting point since it requires very little effort. Let us tackle it first before getting to the real challenge.
+Initially, one might think of using <CodeInline>WorldPos</CodeInline> as <CodeInline>VertexPos</CodeInline>, just as it is used in the global clip plane calculation.
+Even though that is partially correct, it is not the right answer. The <CodeInline>WorldPos</CodeInline> variable does not hold the absolute world position of the vertex, but its position in
+Unreal's *translated world space*: world space shifted by <CodeInline>ResolvedView.PreViewTranslation</CodeInline>, which is typically the negated camera position. In other words, it is roughly the position of the vertex
+relative to the camera. Working in this space keeps the floating-point values small and precise regardless of how far the camera is from the world origin.
+
+This is fine for the global clip plane, because the engine transforms that plane into translated world space on the CPU before uploading it to the view uniform buffer. Our plane, on the other hand, is stored in absolute world space,
+so the vertex position has to be converted into absolute world space before being used in our calculation.
+
+The calculation is trivial: we only need to undo the translation.
 
 <CodeBlock
   code={`
-  { //Function body
-    ...
-    //DFHackToFloat is required to convert the higt precision position value to a vanilla, pitty, loser float.
-    const float3 VertexPos = WorldPos + DFHackToFloat(ResolvedView.WorldCameraOrigin);
-    ...
-  }
+{ //Function body
+    //...
+    //DFHackToFloat is required to convert the high precision (double-float) translation to a vanilla, pitiful, loser float.
+    const float3 VertexPos = WorldPos.xyz - DFHackToFloat(ResolvedView.PreViewTranslation);
+    //...
+}
 `}
-  filename="PrimitiveComponent.h"
+  filename=""
 />
 
-Upon completion of this phase, we can get to the other two variables <CodeInline>bPerObjectClipPlaneEnabled</CodeInline>, <CodeInline>ClipPlane</CodeInline>. 
-The issue that makes accessing those informations a little bit harder is those information's being a property of the object rather than the vertex itself. Position is a property of the the vertex itself
-but <CodeInline>bPerObjectClipPlaneEnabled</CodeInline> and <CodeInline>ClipPlane</CodeInline> properties belongs to the object which owns the vertex itself. Therefore we need to access the 
-data that we sent to the GPU to read those informations.
+<Notification>
+Converting back to absolute world space trades away the precision that translated world space provides. For objects far away from the world origin, the plane could instead be
+translated on the CPU (just as the engine does for the global clip plane), keeping the whole calculation in translated world space. For the scene sizes this feature is usually
+used in, the simple approach above is precise enough.
+</Notification>
 
-To do that we are going to use vertex factory inputs to get access to scene data of the primitive hance <CodeInline>bPerObjectClipPlaneEnabled</CodeInline> and <CodeInline>PerObjectClipPlane</CodeInline> variables.
+### Accessing the Primitive Data
 
+With this step complete, we can get to the other two variables: <CodeInline>bPerObjectClipPlaneEnabled</CodeInline> and <CodeInline>PerObjectClipPlane</CodeInline>.
+What makes accessing them a little bit harder is that they are properties of the object rather than of the vertex. Position is a property of the vertex itself,
+but <CodeInline>bPerObjectClipPlaneEnabled</CodeInline> and <CodeInline>PerObjectClipPlane</CodeInline> belong to the object that owns the vertex. Therefore, we need to access the
+data that we sent to the GPU to read them.
 
+The obvious approach would be to call <CodeInline>GetPrimitiveData(PrimitiveId)</CodeInline>, but a vertex shader does not directly know which primitive it is processing. That knowledge belongs to the
+vertex factory: the piece of code that knows how to fetch vertex data for a given mesh type (static meshes, skeletal meshes, instanced meshes, and so on). As the comment in <CodeInline>GetPrimitiveData</CodeInline> hinted,
+vertex factories expose an overload that takes their intermediates instead of an ID: <CodeInline>GetPrimitiveData(FVertexFactoryIntermediates Intermediates)</CodeInline>. It returns the <CodeInline>FPrimitiveSceneData</CodeInline>
+the factory has already fetched for the current vertex, through whichever path (GPU Scene or uniform buffer) is available on the current platform.
 
+The vertex shaders in the list above already compute these intermediates to evaluate the world position, so we can simply reuse them:
 
+<CodeBlock
+  code={`
+{ //Function body
+    FVertexFactoryIntermediates VFIntermediates = GetVertexFactoryIntermediates(Input); // Already present in the shader
+    //...
+    const FPrimitiveSceneData PrimitiveData = GetPrimitiveData(VFIntermediates);
+
+    const bool bPerObjectClipPlaneEnabled = GetPrimitive_PerObjectClipPlaneEnabled_FromFlags(PrimitiveData.Flags);
+    const float4 PerObjectClipPlane = PrimitiveData.PerObjectClipPlane;
+    //...
+}
+`}
+  filename=""
+/>
+
+### Putting It All Together
+
+Combining the three pieces gives us the final modification. Here it is applied to <CodeInline>AnisotropyPassShader.usf</CodeInline>:
+
+<CodeBlock
+  code={`
+void MainVertexShader(
+    FVertexFactoryInput Input,
+    out FVertexOutput Output
+#if USE_GLOBAL_CLIP_PLANE
+    , out float OutGlobalClipPlaneDistance : SV_ClipDistance
+    , out float OutPerObjectClipPlaneDistance : SV_ClipDistance1
+#endif
+#if INSTANCED_STEREO
+    , out uint ViewportIndex : SV_ViewPortArrayIndex
+#endif
+    )
+{
+    FVertexFactoryIntermediates VFIntermediates = GetVertexFactoryIntermediates(Input);
+    //...
+#if USE_GLOBAL_CLIP_PLANE
+    OutGlobalClipPlaneDistance = dot(ResolvedView.GlobalClippingPlane, float4(WorldPos.xyz, 1));
+
+    const FPrimitiveSceneData PrimitiveData = GetPrimitiveData(VFIntermediates);
+    const bool bPerObjectClipPlaneEnabled = GetPrimitive_PerObjectClipPlaneEnabled_FromFlags(PrimitiveData.Flags);
+    const float3 VertexPos = WorldPos.xyz - DFHackToFloat(ResolvedView.PreViewTranslation);
+
+    //0.0f means that the vertex is on the plane and should be rendered
+    OutPerObjectClipPlaneDistance = bPerObjectClipPlaneEnabled ? dot(PrimitiveData.PerObjectClipPlane, float4(VertexPos, 1)) : 0.0f;
+#endif
+}
+`}
+  filename="AnisotropyPassShader.usf"
+/>
+
+The same few lines have to be repeated in every shader from the list above. A handy way to avoid the duplication is to wrap them in a helper function inside <CodeInline>SceneData.ush</CodeInline> and call it from each shader.
+
+<Notification>
+Nanite does not use vertex factories, so <CodeInline>NaniteRasterizer.usf</CodeInline> is the odd one out. There, the primitive is reached through the instance being rasterized,
+which carries its primitive ID, so <CodeInline>GetPrimitiveData(PrimitiveId)</CodeInline> can be used directly. The rest of the calculation is identical.
+</Notification>
+
+Once the shaders recompile, placing a mesh in the level, ticking <CodeInline>bPerObjectClipPlaneEnabled</CodeInline> in its Details Panel, and adjusting the plane normal and distance is enough to slice it—while
+every other object in the scene, and the global clip plane of any planar reflection, stays untouched.
+
+## Wrapping Up
+
+Per-object clip planes turned out to be a small feature with a long journey. The idea itself fits into a single dot product, but getting two floats and a bit from a component on the game thread
+into a vertex shader required touching every layer of Unreal's rendering architecture:
+
+1. **The primitive component** gained the properties, getters, and setters that artists and gameplay code interact with.
+2. **The scene proxy** learned to mirror that state through all three synchronization paths: creation, recreation, and in-place updates across the thread boundary.
+3. **The primitive uniform shader parameters** gained a new <CodeInline>float4</CodeInline> and a new flag bit, filled in by the builder.
+4. **The packing and unpacking code** was updated on both sides of the CPU-GPU contract, along with the primitive data stride.
+5. **The vertex shaders** now write a second clip distance slot, leaving the engine's global clip plane untouched.
+
+Since the implementation rides on the existing global clip plane infrastructure, it inherits its requirements as well: <CodeInline>r.AllowGlobalClipPlane</CodeInline> must be enabled, which comes with a
+small cost on every vertex shader in the project. In exchange, each primitive in the scene can now carry its own cutting boundary, driven from the editor, Blueprints, or C++.

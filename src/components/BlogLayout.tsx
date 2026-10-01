@@ -1,6 +1,7 @@
 'use client';
 
 import TableOfContents from './TableOfContents';
+import ReadingProgress from './ReadingProgress';
 
 export default function BlogLayout({ children }: { children: React.ReactNode }) {
   return (
@@ -15,8 +16,9 @@ export default function BlogLayout({ children }: { children: React.ReactNode }) 
       {/* Left: fixed TOC + spacer */}
       <TableOfContents />
 
-      {/* Right: article content */}
-      <div style={{ flex: 1, minWidth: 0, overflowX: 'hidden' }}>
+      {/* Right: article content. overflow-x clip (not hidden) keeps the sticky progress bar working. */}
+      <div style={{ flex: 1, minWidth: 0, overflowX: 'clip' }}>
+        <ReadingProgress />
         {children}
       </div>
     </div>

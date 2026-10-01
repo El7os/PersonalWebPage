@@ -44,7 +44,7 @@ export default function Navigation({ children }: { children: React.ReactNode }) 
                                 >
                                     {/* Prompt marker is always rendered so the active link doesn't shift its neighbours */}
                                     <span aria-hidden="true" style={{ color: 'var(--accent-color)', visibility: isActive ? 'visible' : 'hidden' }}>{'> '}</span>
-                                    {link.name.toLowerCase()}
+                                    {`__${link.name.toLowerCase()}__`}
                                     {isActive && <span className="cursor-blink" aria-hidden="true" />}
                                 </Link>
                             );
