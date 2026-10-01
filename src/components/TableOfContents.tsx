@@ -13,7 +13,7 @@ interface HeadingItem {
 // ─── Constants ────────────────────────────────────────────────────────────────
 
 const COLLAPSED_WIDTH = 48;   // px – mini-mode width
-const DEFAULT_WIDTH   = 260;  // px – initial expanded width
+const DEFAULT_WIDTH   = 347;  // px – initial expanded width
 const MIN_WIDTH       = 160;  // px – drag minimum
 const MAX_WIDTH       = 440;  // px – drag maximum
 
@@ -265,7 +265,7 @@ export default function TableOfContents() {
                           display:     'block',
                           width:       '100%',
                           textAlign:   'left',
-                          background:  isActive ? 'rgba(0,255,204,0.08)' : 'transparent',
+                          background:  isActive ? 'rgba(0,255,65,0.08)' : 'transparent',
                           border:      'none',
                           borderLeft:  `2px solid ${isActive ? 'var(--accent-color)' : 'transparent'}`,
                           borderRadius:'0 6px 6px 0',
@@ -361,7 +361,7 @@ export default function TableOfContents() {
               background:     'transparent',
               transition:     'background 0.2s',
             }}
-            onMouseOver={e  => (e.currentTarget.style.background = 'rgba(0,255,204,0.25)')}
+            onMouseOver={e  => (e.currentTarget.style.background = 'rgba(0,255,65,0.25)')}
             onMouseOut={e   => (e.currentTarget.style.background = 'transparent')}
           />
         )}

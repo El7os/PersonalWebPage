@@ -7,7 +7,6 @@ export default function Navigation({ children }: { children: React.ReactNode }) 
 
     const navLinks = [
         { name: 'Home', path: '/' },
-        { name: 'Portfolio', path: '/portfolio' },
         { name: 'Blog', path: '/blog' },
         { name: 'About', path: '/about' },
     ];

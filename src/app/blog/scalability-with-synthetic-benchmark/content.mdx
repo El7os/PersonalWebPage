@@ -1,0 +1,296 @@
+## Introduction
+
+To configure the scalability settings according to the capacity and capabilities of the current machine, it is enough to call the following two functions in order:
+
+<CodeBlock code={`
+UGameUserSettings::RunHardwareBenchmark()
+UGameUserSettings::ApplyHardwareBenchmarkResults()
+`} />
+
+The first function measures the capabilities of the device, finds the scalability settings that suit it, and stores them in the <CodeInline>ScalabilityQuality</CodeInline> variable.
+
+The second function reads these quality settings, applies them, and then saves the new settings into <CodeInline>GameUserSettingsIni</CodeInline>.
+
+## Measuring Machine Performance
+
+Unreal Engine runs a series of tests that put load on the CPU and GPU to measure how the machine performs under stress. Based on the average performance across these tests, the CPU and GPU are each given a score.
+
+Before running the tests, an origin device must be chosen to serve as a reference point. The tests are run on this device and the results are recorded. Comparing the test results of other machines against these recorded values tells us how those machines perform.
+
+Normalization factors are used to record the test results. They are obtained by dividing the test results measured on the origin device by 100. The specifications of the origin device used by Unreal Engine are listed below:
+
+<CodeBlock code={`
+// developer machine: Intel Xeon E5-2660 2.2GHz
+// divided by the actual value on a developer machine to normalize the results
+// Index should be around 100 +-4 on developer machine in a development build (should be the same in shipping)
+`} />
+
+The tests are run inside the <CodeInline>FSynthBenchmark::Run</CodeInline> function.
+
+## CPU Tests
+
+### Ray Intersection
+
+For each *workload*, 200,000 ray-triangle intersection tests are performed. Each test checks whether a randomly generated line segment intersects a fixed triangle.
+
+<CodeBlock code={`
+float RayIntersectBenchmark()
+{
+    FRandomStream RandomStream(0x1234);
+
+    const int32 StepCount = 200000;
+
+    int32 HitCount = 0;
+
+    for(int32 i = 0; i < StepCount; ++i)
+    {
+        FVector Tri[3] = { FVector(0.1f, 0.2f, 2.3f), FVector(2.1f, 0.2f, 0.3f), FVector(-2.1f, 0.2f, 0.3f) };
+
+        FVector Start = RandomStream.GetUnitVector() * 3.0f;
+        FVector End = RandomStream.GetUnitVector() * 3.0f;
+
+        if(LineCheckWithTriangle(Tri[0], Tri[1], Tri[2], Start, End))
+        {
+            HitCount++;
+        }
+    }
+
+    // to avoid getting optimized out
+    return (float)HitCount / (float)StepCount;
+}
+`} />
+
+### Fractal
+
+For each *workload*, the values of the **Julia Fractal** are evaluated over a $256 \times 256$ grid.
+
+<CodeBlock code={`
+float FractalBenchmark()
+{
+    // scales quadratic with the time
+    const int32 Extent = 256;
+
+    int32 Count = 0;
+    float Sum = 0;
+
+    for(int y = 0; y < Extent; ++y)
+    {
+        for(int x = 0; x < Extent; ++x)
+        {
+            Sum += (float)EvaluateJuliaFractalAt((float)x / (float)Extent * 2.0f - 1.0f, (float)y / (float)Extent * 2.0f - 1.0f);
+        }
+    }
+
+    // Aggressive math optimizations and inline expansion can optimize this benchmark's return value into a constant
+    // Introduce some randomness to avoid this, noting the return value of this function is not used, rather the time it takes to complete
+    return Sum / (float)(Extent * Extent) + FMath::FRand();
+}
+`} />
+
+<p align="center">
+  <img src="/blog/scalability-with-synthetic-benchmark/Image_Fractal.png" alt="Fractal"></img>
+</p>
+
+The data gathered from the tests is divided by the number of *workloads* to compute an average. Each test is also given a weight that determines how much it contributes to the overall CPU score. The **Ray-Intersection** test has a weight of 1.0, while the **Fractal** test has a weight of 1.5.
+
+## GPU Tests
+
+Before the GPU tests, the GPU properties are queried and recorded.
+
+<Table
+  columns={['Stat', 'Vulkan', 'D3D11', 'D3D12', 'OpenGL']}
+  rows={[
+    ['Streaming Memory Size', 'Obtained', 'Obtained', 'Obtained', 'Obtained'],
+    ['Non-Streaming Memory Size', 'Obtained', 'Obtained', 'Obtained', 'Obtained'],
+    ['Texture Pool Size', 'Obtained', 'Obtained', 'Obtained, But Adjusted On Windows Only', 'Obtained'],
+    ['Allocated Memory Size', 'Obtained', 'Obtained', 'Obtained', 'Obtained'],
+    ['Dedicated Video Memory', 'Obtained', 'Obtained', 'Obtained', 'Obtained'],
+    ['Total Graphics Memory', 'Obtained', 'Obtained', 'Obtained', 'Obtained'],
+    ['Largest Contiguous Allocation', 'Obtained', 'Obtained', 'Obtained', 'Obtained'],
+    ['Dedicated System Memory', 'Obtained', 'Obtained', 'Obtained', 'Not Obtained'],
+    ['Shared System Memory', 'Obtained', 'Obtained', 'Obtained', 'Not Obtained'],
+  ]}
+  badges={{
+    'Obtained': 'positive',
+    'Not Obtained': 'negative',
+    'Obtained, But Adjusted On Windows Only': 'warning',
+  }}
+/>
+
+<p align="center">
+  <img src="/blog/scalability-with-synthetic-benchmark/Image_DynamicRHI.png" alt="Dynamic RHI"></img>
+</p>
+
+The GPU tests only run if the application is rendering. Unlike the CPU tests, the GPU tests run in stages so that they do not trigger **Timeout Detection and Recovery**. The tests are as follows:
+
+- ALUHeavyNoise
+- TextHeavy
+- DepTexHeavy
+- FillOnly
+- Bandwith
+- VertThroughPut1
+- VertThroughPut2
+
+## Evaluating the Test Results
+
+After the tests, an overall CPU and GPU index is computed from the test results, normalization factors and weights.
+
+<CodeBlock code={`
+float CPUPerfIndex = SynthBenchmark.ComputeCPUPerfIndex(/*out*/ &Results.CPUBenchmarkSteps) * CPUMultiplier;
+float GPUPerfIndex = SynthBenchmark.ComputeGPUPerfIndex(/*out*/ &Results.GPUBenchmarkSteps) * GPUMultiplier;
+`} />
+
+Various scalability values are computed from <CodeInline>CPUPerfIndex</CodeInline> and <CodeInline>GPUPerfIndex</CodeInline>. Of these, only the resolution setting is determined from <CodeInline>GPUPerfIndex</CodeInline> alone. By default, all remaining values are computed from the lower of the <CodeInline>CPUPerfIndex</CodeInline> and <CodeInline>GPUPerfIndex</CodeInline> scores. This behavior can be changed through **Scalability.ini**.
+
+An excerpt of DefaultScalability.ini is shown below. Whether a *Threshold* value starts with “GPU”, “CPU” or “Min” determines which score is used to compute that setting: <CodeInline>GPUPerfIndex</CodeInline>, <CodeInline>CPUPerfIndex</CodeInline> or <CodeInline>FMath::Min(GPUPerfIndex, CPUPerfIndex)</CodeInline>, respectively.
+
+<CodeBlock language="ini" filename="DefaultScalability.ini" code={`
+...
+PerfIndexThresholds_ResolutionQuality="GPU 18 42 115"
+PerfIndexThresholds_ViewDistanceQuality="Min 18 42 105"
+PerfIndexThresholds_AntiAliasingQuality="GPU 18 42 115"
+...
+`} />
+
+<Table
+  columns={[
+    'Quality Setting',
+    'Computation Scalar - Source Default (In absence of the GScalabilityIni)',
+    'Computation Scalar - Engine Default (BaseScalability.ini)',
+    'Thresholds - Source Default (In absence of the GScalabilityIni)',
+    'Thresholds - Engine Default (BaseScalability.ini)',
+  ]}
+  rows={[
+    ['Resolution', 'GPU', 'GPU', '20-50-70', '18-42-115'],
+    ['View Distance', 'Min', 'Min', '20-50-70', '18-42-105'],
+    ['Anti Aliasing', 'Min', 'GPU', '20-50-70', '18-42-115'],
+    ['Shadow Quality', 'Min', 'Min', '20-50-70', '18-42-105'],
+    ['Global Illumination', 'Min', 'GPU', '20-50-70', '18-42-115'],
+    ['Reflection Quality', 'Min', 'GPU', '20-50-70', '18-42-115'],
+    ['Post Process Quality', 'Min', 'GPU', '20-50-70', '18-42-115'],
+    ['Texture Quality', 'Min', 'GPU', '20-50-70', '18-42-115'],
+    ['Effects Quality', 'Min', 'Min', '20-50-70', '18-42-105'],
+    ['Foliage Quality', 'Min', 'GPU', '20-50-70', '18-42-115'],
+    ['Shading Quality', 'Min', 'GPU', '20-50-70', '18-42-115'],
+    ['Landscape Quality', 'Min', 'GPU', '20-50-70', '18-42-115'],
+  ]}
+  align={['left', 'center', 'center', 'center', 'center']}
+  badges={{
+    'GPU': 'accent',
+    'Min': 'warning',
+    'CPU': 'neutral',
+  }}
+/>
+
+**Threshold** values are used to convert the floating-point performance index into an integer. The thresholds define the boundaries of the ranges a performance value can fall into, and a performance value belongs to the first range that contains it. For example, if the performance value is 32 and the thresholds are 20-50-70, the value falls into the $[20, 50]$ range, which is range 1 (range indices start at 0).
+
+The code that maps a performance value to a range index is shown below.
+
+<CodeBlock code={`
+// Threshold the value
+int32 ResultIndex = 0;
+for (float Threshold : Thresholds)
+{
+    if (PerfIndex < Threshold)
+    {
+        break;
+    }
+    ++ResultIndex;
+}
+return ResultIndex;
+`} />
+
+The range calculation works slightly differently for resolution, since resolution is a floating-point value. After the range is found, the resolution is set to the upper bound of the range that contains it. If the resolution quality is not covered by any range (that is, the performance index is greater than every threshold), it is set to the largest threshold.
+
+This is the default behavior, but an <CodeInline>EQualityLevelBehavior::ERelativeToMax</CodeInline> option is also available. See the <CodeInline>Scalability::GetRenderScaleLevelFromQuality</CodeInline> function for more details.
+
+## Applying and Saving the Scalability Settings
+
+At this point <CodeInline>RunHardwareBenchmark</CodeInline> has finished and <CodeInline>ApplyHardwareBenchmarkResults</CodeInline> is called. The function is simply:
+
+<CodeBlock code={`
+void UGameUserSettings::ApplyHardwareBenchmarkResults()
+{
+    // Apply the new settings and save them
+    Scalability::SetQualityLevels(ScalabilityQuality);
+    Scalability::SaveState(GGameUserSettingsIni);
+
+    SaveSettings();
+}
+`} />
+
+### Scalability::SetQualityLevels
+
+The function first clamps every scalability setting except resolution to the number of scalability levels the engine supports. For example, by default the engine supports 5 scalability levels: *Low(0), Medium(1), High(2), Epic(3)* and *Cinematic(4)*. If a setting ends up at a sixth level (for instance, because an extra threshold was added to the .ini file), it is clamped to 5. This is the final operation performed on the scalability settings.
+
+To find out how many levels the engine supports for a given scalability setting, read the <CodeInline code="CVar{ScalabilitySettingsName}_NumLevels" /> console variable.
+
+Scalability settings are ultimately console variables, and they are set to the values obtained from that final operation. Setting these console variables, however, triggers a number of additional functions.
+
+Setting the scalability values on their own does not change much. The real work is done by the functions that listen for changes to these console variables. These listeners are registered in <CodeInline>Scalability::InitScalabilitySystem</CodeInline>.
+
+<CodeBlock code={`
+CVarResolutionQuality.AsVariable()->SetOnChangedCallback(FConsoleVariableDelegate::CreateStatic(&OnChangeResolutionQuality));
+CVarViewDistanceQuality.AsVariable()->SetOnChangedCallback(FConsoleVariableDelegate::CreateStatic(&OnChangeViewDistanceQuality));
+CVarAntiAliasingQuality.AsVariable()->SetOnChangedCallback(FConsoleVariableDelegate::CreateStatic(&OnChangeAntiAliasingQuality));
+CVarShadowQuality.AsVariable()->SetOnChangedCallback(FConsoleVariableDelegate::CreateStatic(&OnChangeShadowQuality));
+CVarGlobalIlluminationQuality.AsVariable()->SetOnChangedCallback(FConsoleVariableDelegate::CreateStatic(&OnChangeGlobalIlluminationQuality));
+CVarReflectionQuality.AsVariable()->SetOnChangedCallback(FConsoleVariableDelegate::CreateStatic(&OnChangeReflectionQuality));
+CVarPostProcessQuality.AsVariable()->SetOnChangedCallback(FConsoleVariableDelegate::CreateStatic(&OnChangePostProcessQuality));
+CVarTextureQuality.AsVariable()->SetOnChangedCallback(FConsoleVariableDelegate::CreateStatic(&OnChangeTextureQuality));
+CVarEffectsQuality.AsVariable()->SetOnChangedCallback(FConsoleVariableDelegate::CreateStatic(&OnChangeEffectsQuality));
+CVarFoliageQuality.AsVariable()->SetOnChangedCallback(FConsoleVariableDelegate::CreateStatic(&OnChangeFoliageQuality));
+CVarShadingQuality.AsVariable()->SetOnChangedCallback(FConsoleVariableDelegate::CreateStatic(&OnChangeShadingQuality));
+CVarLandscapeQuality.AsVariable()->SetOnChangedCallback(FConsoleVariableDelegate::CreateStatic(&OnChangeLandscapeQuality));
+`} />
+
+<p align="center">
+  <img src="/blog/scalability-with-synthetic-benchmark/Image_ScalabilityFlow.png" alt="Scalability Flow"></img>
+</p>
+
+Below are the <CodeInline>ViewDistanceQuality</CodeInline> scalability settings taken from <CodeInline>BaseScalability.ini</CodeInline>.
+
+<CodeBlock language="ini" filename="BaseScalability.ini" code={`
+[ViewDistanceQuality@0]
+r.SkeletalMeshLODBias=2
+r.ViewDistanceScale=0.4
+
+[ViewDistanceQuality@1]
+r.SkeletalMeshLODBias=1
+r.ViewDistanceScale=0.6
+
+[ViewDistanceQuality@2]
+r.SkeletalMeshLODBias=0
+r.ViewDistanceScale=0.8
+
+[ViewDistanceQuality@3]
+r.SkeletalMeshLODBias=0
+r.ViewDistanceScale=1.0
+
+[ViewDistanceQuality@Cine]
+r.SkeletalMeshLODBias=0
+r.ViewDistanceScale=10.0
+`} />
+
+The highest scalability level is always named <CodeInline code="{QualityGroupName}@Cine" /> instead of being given a number.
+
+### Scalability::SaveState
+
+The <CodeInline>Scalability::SaveState</CodeInline> function saves the computed scalability levels to the **GameUserSettings** file. Note that these are only the quality level values. They are stored under the **ScalabilityGroups** section in the following entries:
+
+- <CodeInline>sg.ResolutionQuality</CodeInline>
+- <CodeInline>sg.ViewDistanceQuality</CodeInline>
+- <CodeInline>sg.AntiAliasingQuality</CodeInline>
+- <CodeInline>sg.GlobalIlluminationQuality</CodeInline>
+- <CodeInline>sg.ReflectionQuality</CodeInline>
+- <CodeInline>sg.TextureQuality</CodeInline>
+- <CodeInline>sg.EffectsQuality</CodeInline>
+- <CodeInline>sg.FoliageQuality</CodeInline>
+- <CodeInline>sg.ShadingQuality</CodeInline>
+- <CodeInline>sg.LandscapeQuality</CodeInline>
+
+If this runs in the editor, the settings are saved to the *GEditorSettings* config file instead.
+
+### UGameUserSettings::SaveSettings
+
+Saves the configured variables to the *GameUserSettings* config file. Unlike the scalability levels, these are the actual parameters (e.g. <CodeInline>r.FXAA.Quality = 1</CodeInline>).

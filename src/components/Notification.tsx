@@ -6,9 +6,9 @@ interface NotificationProps {
     children: ReactNode;
 }
 
-const BACKGROUND = 'rgba(0, 255, 204, 0.07)';
-const BORDER_COLOR = 'rgba(0, 255, 204, 0.28)';
-const EMOJI_BG = 'rgba(0, 255, 204, 0.12)';
+const BACKGROUND = 'rgba(0, 255, 65, 0.07)';
+const BORDER_COLOR = 'rgba(0, 255, 65, 0.28)';
+const EMOJI_BG = 'rgba(0, 255, 65, 0.12)';
 
 function parseEmoji(input: string): string {
     const trimmed = input.trim();

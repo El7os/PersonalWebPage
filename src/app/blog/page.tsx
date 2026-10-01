@@ -1,11 +1,11 @@
 export default function Blog() {
     const posts = [
         {
-            slug: "optimizing-draw-calls",
-            title: "Optimizing Draw Calls in Unreal Engine 5",
-            date: "October 24, 2026",
-            excerpt: "Exploring techniques to batch draw calls in Unreal Engine 5 using custom C++ render passes.",
-            readTime: "5 min read"
+            slug: "scalability-with-synthetic-benchmark",
+            title: "Scalability With Synthetic Benchmark in Unreal Engine",
+            date: "October 1, 2026",
+            excerpt: "How Unreal Engine benchmarks the CPU and GPU, turns the results into performance indices and maps them onto scalability settings.",
+            readTime: "8 min read"
         },
         {
             slug: "implementing-per-object-clip-planes",
