@@ -1,4 +1,4 @@
-import Image from 'next/image';
+import AsciiPortrait from './AsciiPortrait';
 
 export default function HeroSection() {
     return (
@@ -11,25 +11,8 @@ export default function HeroSection() {
                 gap: '4rem',
                 padding: '2rem 0',
             }}>
-                {/* Photo */}
-                <div style={{
-                    flex: '0 1 340px',
-                    aspectRatio: '1 / 1',
-                    position: 'relative',
-                    borderRadius: '20px',
-                    overflow: 'hidden',
-                    border: '1px solid rgba(0, 255, 65, 0.35)',
-                    boxShadow: '0 0 40px rgba(0, 255, 65, 0.12), var(--glass-shadow)',
-                }}>
-                    <Image
-                        src="/ProfilePhoto.jpg"
-                        alt="Portrait"
-                        fill
-                        sizes="340px"
-                        priority
-                        style={{ objectFit: 'cover' }}
-                    />
-                </div>
+                {/* Photo, as ASCII art */}
+                <AsciiPortrait />
 
                 {/* Intro */}
                 <div style={{ flex: '1 1 420px', maxWidth: '820px' }}>

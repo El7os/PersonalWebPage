@@ -7,6 +7,7 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
+    "ascii-portrait": "node scripts/generate-ascii-portrait.mjs",
     "kill": "cmd /c \"FOR /F 'tokens=5' %a IN ('netstat -aon ^| findstr :3000') DO taskkill /F /PID %a\""
   },
   "dependencies": {
