@@ -3,14 +3,26 @@
 :root {
   --bg-color: #0d0d0d;
   --text-color: #f2f2f2;
-  --accent-color: #00ff41;
-  --accent-glow: rgba(0, 255, 65, 0.4);
+  --accent-rgb: 0, 255, 65;
+  --accent-color: rgb(var(--accent-rgb));
+  --accent-glow: rgba(var(--accent-rgb), 0.4);
   --glass-bg: rgba(255, 255, 255, 0.05);
   --glass-border: rgba(255, 255, 255, 0.08);
   --glass-shadow: 0 4px 30px rgba(0, 0, 0, 0.5);
   --font-primary: var(--font-geist-sans), sans-serif;
   --font-mono: var(--font-geist-mono), monospace;
 }
+
+/* Per-page secondary colour. Navigation wraps the page in [data-section];
+   --accent-color/--accent-glow are re-declared so they resolve the overridden --accent-rgb. */
+[data-section] {
+  display: contents;
+  --accent-color: rgb(var(--accent-rgb));
+  --accent-glow: rgba(var(--accent-rgb), 0.4);
+}
+
+[data-section="blog"]  { --accent-rgb: 255, 140, 0; }  /* orange #ff8c00 */
+[data-section="about"] { --accent-rgb: 0, 170, 255; }  /* blue   #00aaff */
 
 * {
   box-sizing: border-box;
@@ -70,8 +82,8 @@ a {
 
 .glass-panel:hover {
   transform: translateY(-5px);
-  box-shadow: 0 12px 40px rgba(0, 255, 65, 0.15);
-  border-color: rgba(0, 255, 65, 0.3);
+  box-shadow: 0 12px 40px rgba(var(--accent-rgb), 0.15);
+  border-color: rgba(var(--accent-rgb), 0.3);
 }
 
 .heading-primary {
@@ -114,7 +126,7 @@ a {
 
 .btn-primary:hover {
   transform: scale(1.05);
-  box-shadow: 0 0 30px rgba(0, 255, 65, 0.6);
+  box-shadow: 0 0 30px rgba(var(--accent-rgb), 0.6);
 }
 
 .btn-outline {

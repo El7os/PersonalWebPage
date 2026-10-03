@@ -4,6 +4,7 @@ import { usePathname } from 'next/navigation';
 
 export default function Navigation({ children }: { children: React.ReactNode }) {
     const pathname = usePathname();
+    const section = pathname.startsWith('/blog') ? 'blog' : pathname.startsWith('/about') ? 'about' : 'home';
 
     const navLinks = [
         { name: 'Home', path: '/' },
@@ -12,7 +13,7 @@ export default function Navigation({ children }: { children: React.ReactNode }) 
     ];
 
     return (
-        <>
+        <div data-section={section}>
             <nav style={{
                 position: 'fixed',
                 top: 0,
@@ -76,6 +77,6 @@ export default function Navigation({ children }: { children: React.ReactNode }) 
                     </p>
                 </div>
             </footer>
-        </>
+        </div>
     );
 }

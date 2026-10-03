@@ -19,14 +19,14 @@ interface TableProps {
 }
 
 const BORDER_COLOR = 'rgba(255, 255, 255, 0.08)';
-const HEADER_BG = 'rgba(0, 255, 65, 0.06)';
+const HEADER_BG = 'rgba(var(--accent-rgb), 0.06)';
 const STRIPE_BG = 'rgba(255, 255, 255, 0.02)';
 
 const BADGE_COLORS: Record<BadgeTone, { color: string; bg: string; border: string }> = {
     positive: { color: '#98C379', bg: 'rgba(152, 195, 121, 0.1)', border: 'rgba(152, 195, 121, 0.3)' },
     negative: { color: '#E06C75', bg: 'rgba(224, 108, 117, 0.1)', border: 'rgba(224, 108, 117, 0.3)' },
     warning:  { color: '#E5C07B', bg: 'rgba(229, 192, 123, 0.1)', border: 'rgba(229, 192, 123, 0.3)' },
-    accent:   { color: '#00ff41', bg: 'rgba(0, 255, 65, 0.08)', border: 'rgba(0, 255, 65, 0.28)' },
+    accent:   { color: 'var(--accent-color)', bg: 'rgba(var(--accent-rgb), 0.08)', border: 'rgba(var(--accent-rgb), 0.28)' },
     neutral:  { color: '#ABB2BF', bg: 'rgba(255, 255, 255, 0.06)', border: 'rgba(255, 255, 255, 0.12)' },
 };
 
@@ -100,7 +100,7 @@ export default function Table({
                                         padding: cellPadding,
                                         textAlign: align[i] ?? 'left',
                                         verticalAlign: 'bottom',
-                                        borderBottom: '1px solid rgba(0, 255, 65, 0.28)',
+                                        borderBottom: '1px solid rgba(var(--accent-rgb), 0.28)',
                                         color: 'var(--accent-color)',
                                         fontFamily: 'var(--font-mono), monospace',
                                         fontSize: '0.8rem',
