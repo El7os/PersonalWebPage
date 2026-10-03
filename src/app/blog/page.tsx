@@ -1,3 +1,4 @@
+import DecryptText from '@/components/DecryptText';
 export default function Blog() {
     const posts = [
         {
@@ -18,7 +19,7 @@ export default function Blog() {
 
     return (
         <div className="container" style={{ padding: '4rem 2rem', maxWidth: '900px' }}>
-            <h1 className="heading-primary" style={{ marginBottom: '1rem' }}>Research & Thoughts</h1>
+            <h1 className="heading-primary" style={{ marginBottom: '1rem' }}><DecryptText text="Research & Thoughts" /></h1>
             <p className="text-muted" style={{ maxWidth: '600px', marginBottom: '4rem', fontSize: '1.1rem' }}>
                 Deep dives into game architecture, C++ optimization, Unreal Engine rendering techniques, and performance analysis.
             </p>

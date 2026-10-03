@@ -1,4 +1,5 @@
 import AsciiPortrait from './AsciiPortrait';
+import DecryptText from './DecryptText';
 
 export default function HeroSection() {
     return (
@@ -16,7 +17,7 @@ export default function HeroSection() {
 
                 {/* Intro */}
                 <div style={{ flex: '1 1 420px', maxWidth: '820px' }}>
-                    <h1 className="heading-primary" style={{ fontSize: 'clamp(2.5rem, 6vw, 4.5rem)', lineHeight: 1.15, marginTop: '-0.28em' }}>E. Yahya Arabacı</h1>
+                    <h1 className="heading-primary" style={{ fontSize: 'clamp(2.5rem, 6vw, 4.5rem)', lineHeight: 1.15, marginTop: '-0.28em' }}><DecryptText text="E. Yahya Arabacı" /></h1>
 
                     <p className="text-muted" style={{ marginBottom: '2rem' }}>
                         Designing immersive gameplay experiences with C++ in Unreal Engine, blending powerful logic with premium web presentations.

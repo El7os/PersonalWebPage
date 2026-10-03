@@ -1,3 +1,4 @@
+import DecryptText from '@/components/DecryptText';
 export default function About() {
     const skills = [
         { category: "Languages", items: ["C++", "Python"] },
@@ -40,7 +41,7 @@ export default function About() {
 
                 {/* Main Content Area */}
                 <div>
-                    <h1 className="heading-primary" style={{ marginBottom: '2rem' }}>About Me</h1>
+                    <h1 className="heading-primary" style={{ marginBottom: '2rem' }}><DecryptText text="About Me" /></h1>
 
                     <div className="glass-panel" style={{ padding: '2.5rem', marginBottom: '3rem' }}>
                         <h3 style={{ fontSize: '1.5rem', color: '#fff', marginBottom: '1rem', fontWeight: 'bold' }}>Background</h3>

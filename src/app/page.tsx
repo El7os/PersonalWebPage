@@ -10,10 +10,13 @@ export default function Home() {
           Recent Research
         </h3>
 
+        {/* Same width as the hero row above: portrait (340px) + gap (4rem) + intro (max 820px) */}
         <div style={{
           display: 'grid',
           gridTemplateColumns: 'repeat(auto-fit, minmax(300px, 1fr))',
-          gap: '2rem'
+          gap: '2rem',
+          maxWidth: 'calc(340px + 4rem + 820px)',
+          margin: '0 auto'
         }}>
           <div className="glass-panel" style={{ padding: '0', overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
             <div style={{ height: '200px', backgroundColor: '#111', backgroundImage: 'url("/blog/scalability-with-synthetic-benchmark/Image_Fractal.png")', backgroundSize: 'cover', backgroundPosition: 'center' }} />
