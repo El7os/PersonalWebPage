@@ -573,7 +573,6 @@ void FPrimitiveSceneProxy::SetPerObjectClipPlaneEnabled_RenderThread(bool bEnabl
     check(IsInRenderingThread());
 
     bPerObjectClipPlaneEnabled = bEnabled;
-    RequestPrimitiveUniformBufferUpdate();
 }
 
 void FPrimitiveSceneProxy::SetPerObjectClipPlane_RenderThread(const FVector4& ClipPlane)
@@ -582,32 +581,14 @@ void FPrimitiveSceneProxy::SetPerObjectClipPlane_RenderThread(const FVector4& Cl
     check(IsInRenderingThread());
 
     PerObjectClipPlane = ClipPlane;
-    RequestPrimitiveUniformBufferUpdate();
 }
-
-//Tells the scene that the GPU representation of this primitive is stale.
-void FPrimitiveSceneProxy::RequestPrimitiveUniformBufferUpdate()
-{
-    if (FPrimitiveSceneInfo* SceneInfo = GetPrimitiveSceneInfo())
-    {
-        GetScene().RequestUniformBufferUpdate(*SceneInfo);
-    }
-}
-`}
   filename="PrimitiveSceneProxy.h / .cpp"
 />
 
 These functions first check whether the call is made on the render thread, and then mutate the variables. It is safe to change the values since
 these functions are designed to be called on the same thread that owns the scene proxy.
 
-Notice the extra <CodeInline>RequestPrimitiveUniformBufferUpdate</CodeInline> call. As we are going to see in the next chapter, the proxy is not what the GPU reads; the engine derives a
-GPU-side copy of it and only re-uploads that copy when it is told the primitive has changed. Mutating the proxy alone would leave the GPU with the old plane, so we explicitly flag the
-primitive for a uniform buffer update.
 
-<Notification emoji="⚠️">
-The exact API used to flag a primitive for a GPU Scene update has moved around between engine versions. Check how the engine handles a similar
-runtime-updatable property (such as Custom Primitive Data) in your version and follow the same route.
-</Notification>
 
 On the other hand, the game thread versions of the functions cannot perform a similar direct mutation. What we are going to do instead is to queue a render command that changes the values of the variables
 on the render thread. The <CodeInline>ENQUEUE_RENDER_COMMAND</CodeInline> macro becomes handy here, since it is designed to let developers enqueue render commands from threads other than
@@ -718,45 +699,43 @@ later would clip the object against a stale plane.
 ## Sending the Data to the GPU
 
 At this point, primitive scene proxies are fully synchronized with the per-object clip plane state of their source components.
-However, this information is not yet useful; it resides entirely on the CPU and has not been sent out to the GPU, which is the next step of the implementation.
+However, this information is not yet useful; it resides entirely on the CPU and has not been sent out to the GPU.
 
-Sending data to the GPU is fundamentally different from updating a variable on an Actor or pushing data to the user interface for display.
-Having two distinct physical memory components, and hence two different memory spaces, makes it far more complex and error-prone.
+Unreal mostly handles this heavy task and there are little things left to do. But before doing any of the changes it might be helpfull to 
+gain some insight about Unreal's way of rendering the scene.
 
-While graphics APIs offer several ways to transfer data to the GPU, only one is relevant to this use case: uniform buffers.
+Unreal keeps a copy of the scene on the GPU (GPU scene) and all the effort is to keep this scene in-sync with the game scene without tanking the performance. The general approach is the same as with the proxies. When a scene releated object is created, destroyed or updated it marks itself as <CodeInline>RequiresUniformBufferUpdate</CodeInline>.
+The engine then derives a intermediart POD entity from that object. It is then gets serialized into a continues stream of <CodeInline>FVector4f</CodeInline> elements right before being sent to the GPU. Finally the GPU updates the relevant uniform buffer segments using that data. This is an error prone process yet unreal does most of the heavy lifting.
 
-### What Is a Uniform Buffer
+We are going to follow through the same process which is the following in a nutshell.
 
-Uniform buffers are dedicated GPU memory regions that store data shared across a shader execution. They can be accessed by every shader thread and generally contain information about the shader state, the object being rendered, or the state of the computation.
+1. **Mark the proxy as <CodeInline>RequiresUniformBufferUpdate</CodeInline> it per-object clip plane parameters gets updated.**
+2. **Alter the POD data generation from the proxy so that it also contains per-object clip plane parameters.**
+3. **Alter the serialization process to make it serialize the per-object clip plane parameters correctly.**
+4. **Update the deserialization process on the GPU to unpack the per-object clip plane parameters successfully.
 
-While a shader cannot mutate a uniform buffer during execution, the CPU can update its contents prior to a draw call. This is handy when applying the same shader to different objects or different contexts. For instance, when Unreal compiles a shader out of a material, it does not change or recompile it for every object instance that uses the same material. It only updates the uniform buffers dedicated to that shader with the information of the object being drawn.
 
-Because per-object clip plane parameters are part of the object's render state, and do not change depending on the vertex being processed or the pixel being drawn, they are ideal candidates to put into a uniform buffer.
+<Notification emoji="⚠️">
+The exact API used to flag a primitive for a GPU Scene update has moved around between engine versions. Check how the engine handles a similar
+runtime-updatable property (such as Custom Primitive Data) in your version and follow the same route.
+</Notification>
 
-### The Implicit Memory Contract
 
-Since uniform buffers are basically raw memory regions, they can contain any type of information. This may not seem like an issue at first glance, but precisely because they can contain anything, knowing the memory layout of the buffer becomes a problem. It is not possible to tell whether an eight-bit-long value contains eight different boolean flags or a single one-byte unsigned integer just by looking at the raw memory in the buffer. Knowing the memory layout of the information beforehand is crucial; otherwise, it would be like playing the lottery with raw memory to get meaningful information out of it.
-
-A uniform buffer has to be read following exactly the same memory layout it was written with on the CPU. Even shifting a single bit would corrupt the whole buffer. Therefore, it is safe to say that it requires a hidden contract between the CPU and the GPU.
-
-<p align="center">
-  <img src="/blog/implementing-per-object-clip-planes/Image_MemoryInterpretation.svg" alt="Memory Interpretation"></img>
-</p>
-
-For instance, let's say the 13th <CodeInline>FVector4f</CodeInline> of a buffer contains the world location of a component in its first three elements. Then the GPU has to look at exactly that location
-to unpack the world location—not the 14th <CodeInline>FVector4f</CodeInline>, and not the last three elements of the 13th <CodeInline>FVector4f</CodeInline>.
-
-### How Unreal Transmits Primitive Data
-
-Unreal begins the process by scanning through the render scene to collect the rendering state of all relevant objects.
-These states, along with plenty of other scene data, get serialized into a stream of <CodeInline>FVector4f</CodeInline> elements.
-In this context, these elements serve as the fundamental raw memory units for Unreal Engine. This serialized stream is then pushed across the CPU-GPU boundary (into what Unreal calls the GPU Scene). Upon receiving the data, the GPU deserializes it to reconstruct the scene state on the GPU side.
+Unreal keeps a copy of the scene on the GPU, which it calls the GPU Scene. It 
+Every primitive in the scene owns a slot in it, holding everything a shader needs to know
+about that primitive: its transforms, bounds, flags, custom primitive data, and so on. To fill those slots, Unreal begins the process by scanning through the render scene on the render thread
+and collecting the rendering state of the relevant primitive scene proxies. These states get serialized into a stream of <CodeInline>FVector4f</CodeInline> elements.
+In this context, these elements serve as the fundamental raw memory units for Unreal Engine. This serialized stream is then pushed across the CPU-GPU boundary into the GPU Scene, where shaders deserialize it to reconstruct the state of a primitive on the GPU side.
 
 <p align="center">
   <img src="/blog/implementing-per-object-clip-planes/Image_InformationFlow.svg" alt="Information Flow"></img>
 </p>
 
-Because this process is a performance-heavy task, Unreal does not regather and retransmit render states every frame, but rather updates only the render states of objects that are either newly created or updated. Consequently, if a static mesh actor remains unchanged in the scene, the rendering state representing its primitive scene proxy is not re-sent to the GPU. This is exactly why the runtime setters in the previous chapter had to flag the primitive for an update.
+However, Unreal does not regather and retransmit the render state of every primitive every frame. A scene can easily contain tens of thousands of primitives, and most of them, such as walls, floors,
+and props, never change once they are placed. Since the GPU Scene persists across frames, the data uploaded for those primitives stays valid, and gathering, serializing, and uploading it again
+would only burn CPU time and bandwidth for no visible gain. Instead, Unreal updates only the render states of primitives that are either newly added to the scene or explicitly flagged as changed.
+Consequently, if a static mesh actor remains unchanged in the scene, the rendering state representing its primitive scene proxy is not re-sent to the GPU. This is exactly why the runtime setters
+in the previous section had to flag the primitive for an update: without it, the new plane would be stored in the proxy but would never reach the GPU.
 
 Whether it runs for a newly created object or for one that has just been flagged, each update follows the same path from the CPU to the GPU. The whole process explained above can be summarized into the following multi-stage pipeline, which also takes care of memory alignment along the way:
 
@@ -767,6 +746,49 @@ Whether it runs for a newly created object or for one that has just been flagged
 
 The goal of this implementation is not to rewrite this infrastructure, but to change it just enough so that primitive proxies transmit their per-object clip plane
 information alongside their standard render state, allowing the GPU to unpack it correctly. Therefore, the main focus here is on modifying steps 1, 2 and 4, as each of them has to learn about our new data. We are not going to change how the data is sent to the GPU (step 3), since it is not relevant to our implementation.
+
+### Information Gathering And Packing
+
+As it is said before Unreal scans through the scene and derives information about the objects in the scene. This final form of the object information is generally densly packed and does not contain any logic, a POD type one might say.
+
+Scene proxies and all those other objects contains those releated informations as well as 
+
+Since all those objects contains rendering releated informations as well as the logic to update, use or manipulate The information is a densly packed POD object 
+
+This derived informatioin order to reconstruct the scene withing the GPU. 
+
+The renderer scene on the CPU consists of scene proxies as well as views and many other objects. Each of those objects requires different type and amound of data just to be represented corretly. Unreal finally collec   
+Scene proxies and other objects creates a renderer scene on the CPU. Each of those objects contains 
+
+The main goal of this stage is deriving densly packed POD o
+The information gathering process is producing data only (POD) 
+
+A renderer scene contains wide selection of objects varying from views (actual view points) to lights and niagara particles. Each of them requires
+
+Each object requires different type and amount of data 
+
+As it is being said above, Unreal scans the renderer scene and updates the GPU scene with the information it collected from primitive proxies, light proxies, views and many more things. With all those information it constructs a replica of the scene on the GPU side. Different types of objects requires different type and amount of data to be sent to the GPU in order to be replicated corretly. Hence the render state retreived from each object type is different. For example a view produces a its render state as
+<CodeInline>FViewUniformShaderParameters</CodeInline> while <CodeInline>FSceneTextureUniformParameters</CodeInline> is produces to represent scene textures like depth and base color buffers. Needles to say primitive scene proxies has its own render state object type, it is called <CodeInline>FPrimitiveUniformShaderParameters</CodeInline>. 
+Since the required information to replicate different types of of
+
+To do this is packages all those information and serialize it just to sent it to 
+
+
+### The Implicit Memory Contract
+
+What arrives on the GPU is basically a raw memory region, and it can contain any type of information. This may not seem like an issue at first glance, but precisely because it can contain anything, knowing the memory layout of the data becomes a problem. It is not possible to tell whether an eight-bit-long value contains eight different boolean flags or a single one-byte unsigned integer just by looking at the raw memory. Knowing the memory layout of the information beforehand is crucial; otherwise, it would be like playing the lottery with raw memory to get meaningful information out of it.
+
+The data has to be read on the GPU following exactly the same memory layout it was written with on the CPU. Even shifting a single bit would corrupt the whole data. Therefore, it is safe to say that it requires a hidden contract between the CPU and the GPU.
+
+<p align="center">
+  <img src="/blog/implementing-per-object-clip-planes/Image_MemoryInterpretation.svg" alt="Memory Interpretation"></img>
+</p>
+
+For instance, let's say the 13th <CodeInline>FVector4f</CodeInline> of a buffer contains the world location of a component in its first three elements. Then the GPU has to look at exactly that location
+to unpack the world location—not the 14th <CodeInline>FVector4f</CodeInline>, and not the last three elements of the 13th <CodeInline>FVector4f</CodeInline>.
+
+### How Unreal Transmits Primitive Data
+
 
 Before diving into the primitive data, it is worth noting that the primitive render state is only one of many uniform shader parameter structures in Unreal. The engine splits the information a shader
 needs into several structures, mostly grouped by how often their contents change. <CodeInline>FViewUniformShaderParameters</CodeInline> (bound as "View" in shaders) holds the per-view information
