@@ -582,6 +582,7 @@ void FPrimitiveSceneProxy::SetPerObjectClipPlane_RenderThread(const FVector4& Cl
 
     PerObjectClipPlane = ClipPlane;
 }
+`}
   filename="PrimitiveSceneProxy.h / .cpp"
 />
 
@@ -705,11 +706,11 @@ Unreal mostly handles this heavy task and there are little things left to do. Bu
 gain some insight about Unreal's way of rendering the scene.
 
 Unreal keeps a copy of the scene on the GPU (GPU scene) and all the effort is to keep this scene in-sync with the game scene without tanking the performance. The general approach is the same as with the proxies. When a scene releated object is created, destroyed or updated it marks itself as <CodeInline>RequiresUniformBufferUpdate</CodeInline>.
-The engine then derives a intermediart POD entity from that object. It is then gets serialized into a continues stream of <CodeInline>FVector4f</CodeInline> elements right before being sent to the GPU. Finally the GPU updates the relevant uniform buffer segments using that data. This is an error prone process yet unreal does most of the heavy lifting.
+The engine then derives a intermediart POD entity from that object. It is then gets serialized into a continued stream of <CodeInline>FVector4f</CodeInline> elements right before being sent to the GPU. Finally the GPU updates the relevant uniform buffer segments using that data. This is an error prone process yet unreal does most of the heavy lifting.
 
 We are going to follow through the same process which is the following in a nutshell.
 
-1. **Mark the proxy as <CodeInline>RequiresUniformBufferUpdate</CodeInline> it per-object clip plane parameters gets updated.**
+1. **Mark the proxy as <CodeInline>RequiresUniformBufferUpdate</CodeInline> its per-object clip plane parameters gets updated.**
 2. **Alter the POD data generation from the proxy so that it also contains per-object clip plane parameters.**
 3. **Alter the serialization process to make it serialize the per-object clip plane parameters correctly.**
 4. **Update the deserialization process on the GPU to unpack the per-object clip plane parameters successfully.
@@ -720,32 +721,93 @@ The exact API used to flag a primitive for a GPU Scene update has moved around b
 runtime-updatable property (such as Custom Primitive Data) in your version and follow the same route.
 </Notification>
 
-
-Unreal keeps a copy of the scene on the GPU, which it calls the GPU Scene. It 
-Every primitive in the scene owns a slot in it, holding everything a shader needs to know
-about that primitive: its transforms, bounds, flags, custom primitive data, and so on. To fill those slots, Unreal begins the process by scanning through the render scene on the render thread
-and collecting the rendering state of the relevant primitive scene proxies. These states get serialized into a stream of <CodeInline>FVector4f</CodeInline> elements.
-In this context, these elements serve as the fundamental raw memory units for Unreal Engine. This serialized stream is then pushed across the CPU-GPU boundary into the GPU Scene, where shaders deserialize it to reconstruct the state of a primitive on the GPU side.
-
 <p align="center">
   <img src="/blog/implementing-per-object-clip-planes/Image_InformationFlow.svg" alt="Information Flow"></img>
 </p>
 
-However, Unreal does not regather and retransmit the render state of every primitive every frame. A scene can easily contain tens of thousands of primitives, and most of them, such as walls, floors,
-and props, never change once they are placed. Since the GPU Scene persists across frames, the data uploaded for those primitives stays valid, and gathering, serializing, and uploading it again
-would only burn CPU time and bandwidth for no visible gain. Instead, Unreal updates only the render states of primitives that are either newly added to the scene or explicitly flagged as changed.
-Consequently, if a static mesh actor remains unchanged in the scene, the rendering state representing its primitive scene proxy is not re-sent to the GPU. This is exactly why the runtime setters
-in the previous section had to flag the primitive for an update: without it, the new plane would be stored in the proxy but would never reach the GPU.
+### Marking The Proxies
 
-Whether it runs for a newly created object or for one that has just been flagged, each update follows the same path from the CPU to the GPU. The whole process explained above can be summarized into the following multi-stage pipeline, which also takes care of memory alignment along the way:
+Unreal generates uniform buffer shards from the objects in the scene. Different types fo shards exists to handle different types of objects such as local lights, hair strands or skeletal mesh to cover different needs. Primitive scene proxies generates <CodeInline>FPrimitiveUnfiromShaderParameters</CodeInline> as their shards. This object is a POD type like other shards and contains rendering releated properties of the proxy in a much compact way. 
 
-1. **Information Gathering and Packing:** The render state is gathered from primitive scene proxies across the scene and packed into explicit shader parameter structures that enforce proper byte alignment before serialization.
-2. **Serialization:** The information is serialized into a contiguous stream of <CodeInline>FVector4f</CodeInline>s.
-3. **GPU Transmission:** The raw serialized data gets sent to the GPU.
-4. **Deserialization:** The GPU unpacks the stream back into its corresponding HLSL shader struct representation to be accessed during rendering.
+These objects are then used to update the scene on the GPU side. Since this process has a significant performance cost unreal does not do it unless it is necessary. 
+It is automatically done by the engine when a proxys is created or destroyed, yet updating the scene when a property of the proxy changes is completely responsibility of the programmer. When it is decided that uniform buffer update is required it is as easy as calling <CodeInline>RequiresUniformBufferUpdate</CodeInline> to request unreal to create 
+the shard from the proxy and resend it to the gpu.
 
-The goal of this implementation is not to rewrite this infrastructure, but to change it just enough so that primitive proxies transmit their per-object clip plane
-information alongside their standard render state, allowing the GPU to unpack it correctly. Therefore, the main focus here is on modifying steps 1, 2 and 4, as each of them has to learn about our new data. We are not going to change how the data is sent to the GPU (step 3), since it is not relevant to our implementation.
+When per-object clip plane parameters changes on the source component it updates the scene proxy, or it recreates in case of editor. Yet this information never arrives to the gpu. The proxy should be marked as <CodeInline>RequiresUniformBufferUpdate</CodeInline> so that the engine recreates the uniform buffer parameters from the component so the parameters can be passed to the GPU to update the scene there. 
+
+Inspect the changes in the following code. 
+
+<CodeBlock
+  code={`
+void FPrimitiveSceneProxy::SetPerObjectClipPlaneEnabled_RenderThread(bool bEnabled)
+{
+  //To ensure that this function is called within the render thread
+  check(IsInRenderingThread())
+
+    if (bPerObjectClipPlaneEnabled != bEnabled)
+    {
+        bPerObjectClipPlaneEnabled = bEnabled;
+
+        if (PrimitiveSceneInfo)
+        {
+            Scene->RequestUniformBufferUpdate(*PrimitiveSceneInfo);
+            Scene->RequestGPUSceneUpdate(*PrimitiveSceneInfo, EPrimitiveDirtyState::ChangedOther);
+        }
+    }
+}
+
+void FPrimitiveSceneProxy::SetPerObjectClipPlane_RenderThread(const FVector4& ClipPlane)
+{
+    //To ensure that this function is called within the render thread
+    check(IsInRenderingThread())
+
+    const bool bShouldUpdate = bPerObjectClipPlaneEnabled && !ClipPlane.Equals(PerObjectClipPlane);
+    
+    PerObjectClipPlane = ClipPlane;
+
+    if (bShouldUpdate && PrimitiveSceneInfo)
+    {
+      Scene->RequestUniformBufferUpdate(*PrimitiveSceneInfo);
+      Scene->RequestGPUSceneUpdate(*PrimitiveSceneInfo, EPrimitiveDirtyState::ChangedOther);
+    }
+}
+`}
+  filename="PrimitiveSceneProxy.cpp"
+/>
+
+These functions are updated so that they check whehter the current state of the proxy has changed and marks the proxy if so. Thus, it enforces the engine to recreate the
+uniform buffer shader parameters generated by this proxy. 
+
+### POD Data Creation
+
+As it mentioned above unreal derives a POD structure named <CodeInline>FPrimitiveUniformShaderParameters</CodeInline>. It is a densly packed information only object and the 
+final stop of the rendering data before getting serialized and sent out to the GPU. With the recent code changes, unreal rebuilds a <CodeInline>FPrimitiveUniformShaderParameters</CodeInline> instance when per-object clip plane parameters changes along with standart <CodeInline>FPrimitiveSceneProxy</CodeInline> creation or update paths. However the generated <CodeInline>FPrimitiveUniformShaderParameters</CodeInline> does not create and information about per-object clip plane parameters. It is required to extend this structure to contain those information as well.
+
+     
+
+
+<CodeBlock
+  code={`
+/**
+* The uniform shader parameters associated with a primitive.
+* Note: Must match FPrimitiveSceneData in shaders.
+* Note 2: Try to keep this 16 byte aligned. i.e |Matrix4x4|Vector3,float|Vector3,float|Vector4|  _NOT_  |Vector3,(waste padding)|Vector3,(waste padding)|Vector3. Or at least mark out padding if it can't be avoided.
+*/
+BEGIN_GLOBAL_SHADER_PARAMETER_STRUCT(FPrimitiveUniformShaderParameters,ENGINE_API)
+    SHADER_PARAMETER(uint32,        Flags)
+    //...
+    SHADER_PARAMETER(float,         PixelProgrammableDistanceSquared)
+    SHADER_PARAMETER(float,         MaterialDisplacementFadeOutSize)
+    SHADER_PARAMETER(FUintVector2,  MeshPaintTextureDescriptor)
+    SHADER_PARAMETER(uint32,        NaniteRayTracingDataOffset)
+    SHADER_PARAMETER(float,         MaxWPOExtent)
+    SHADER_PARAMETER(uint32,        CustomStencilValueAndMask)
+    SHADER_PARAMETER(uint32,        VisibilityFlags)
+    SHADER_PARAMETER_ARRAY(FVector4f, CustomPrimitiveData, [FCustomPrimitiveData::NumCustomPrimitiveDataFloat4s]) // Custom data per primitive that can be accessed through material expression parameters and modified through UStaticMeshComponent
+END_GLOBAL_SHADER_PARAMETER_STRUCT()
+`}
+  filename="PrimitiveUniformShaderParameters.h"
+/>
 
 ### Information Gathering And Packing
 
