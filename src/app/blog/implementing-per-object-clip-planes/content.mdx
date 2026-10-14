@@ -700,21 +700,17 @@ later would clip the object against a stale plane.
 ## Sending the Data to the GPU
 
 At this point, primitive scene proxies are fully synchronized with the per-object clip plane state of their source components.
-However, this information is not yet useful; it resides entirely on the CPU and has not been sent out to the GPU.
+However, this information is not yet useful; it resides entirely on the CPU and has not been transmitted to the GPU.
 
-Unreal mostly handles this heavy task and there are little things left to do. But before doing any of the changes it might be helpfull to 
-gain some insight about Unreal's way of rendering the scene.
+Unreal Engine handles most of the heavy lifting of this task yet it still requires some modifications to achieve our goal 
+But before, gaining some insights about how Unreal's information pipeline helps clarifying the next steps.
 
-Unreal keeps a copy of the scene on the GPU (GPU scene) and all the effort is to keep this scene in-sync with the game scene without tanking the performance. The general approach is the same as with the proxies. When a scene releated object is created, destroyed or updated it marks itself as <CodeInline>RequiresUniformBufferUpdate</CodeInline>.
-The engine then derives a intermediart POD entity from that object. It is then gets serialized into a continued stream of <CodeInline>FVector4f</CodeInline> elements right before being sent to the GPU. Finally the GPU updates the relevant uniform buffer segments using that data. This is an error prone process yet unreal does most of the heavy lifting.
+Unreal maintains a copy of the world state on the GPU, often called the GPU scene. The core challange of this system is keeping the GPU Scene synchronized with the CPU game world without introducing performance bottlenecks. Unreal solves this problem using an incremental update strategy smiliar to scene proxies.
 
-We are going to follow through the same process which is the following in a nutshell.
-
-1. **Mark the proxy as <CodeInline>RequiresUniformBufferUpdate</CodeInline> its per-object clip plane parameters gets updated.**
-2. **Alter the POD data generation from the proxy so that it also contains per-object clip plane parameters.**
-3. **Alter the serialization process to make it serialize the per-object clip plane parameters correctly.**
-4. **Update the deserialization process on the GPU to unpack the per-object clip plane parameters successfully.
-
+1. When a scene-relevant object is created, destroyed, or modified on the render thread, it marks its render state as dirty via <CodeInline>RequiresUniformBufferUpdate</CodeInline>.
+2. The engine derives an intermediate POD (Plain Old Data) structure from the proxy.
+3. This structure is serialized into a contiguous stream of <CodeInline>FVector4f</CodeInline> elements immediatelly before GPU transmission.
+4. The GPU receives this raw memory stream and updated the corresponding uniform buffer segments.
 
 <Notification emoji="⚠️">
 The exact API used to flag a primitive for a GPU Scene update has moved around between engine versions. Check how the engine handles a similar
@@ -727,7 +723,25 @@ runtime-updatable property (such as Custom Primitive Data) in your version and f
 
 ### Marking The Proxies
 
-Unreal generates uniform buffer shards from the objects in the scene. Different types fo shards exists to handle different types of objects such as local lights, hair strands or skeletal mesh to cover different needs. Primitive scene proxies generates <CodeInline>FPrimitiveUnfiromShaderParameters</CodeInline> as their shards. This object is a POD type like other shards and contains rendering releated properties of the proxy in a much compact way. 
+Unreal generates uniform buffer parameter payloads from the objects in the scene. Different types of objects requires different type and amount of data to be sent to the GPU in order to be replicated corretly, hence the uniform buffer parameters retreived from each object type is different. For example a view produces a 
+<CodeInline>FViewUniformShaderParameters</CodeInline> while <CodeInline>FSceneTextureUniformParameters</CodeInline> is produced to represent scene textures like depth and base color buffers. Needles to say primitive scene proxies has its own render state object type, it is called <CodeInline>FPrimitiveUniformShaderParameters</CodeInline>. 
+
+Like other shader parameter structures, it is a POD type that encapsulates the source object's rendering properties into a compact, cache-friendly layout.
+These structures are used to maintain GPU Scene state. Because serializing and transmitting uniform buffer data carries a performance overhead, Unreal Engine updates them on-demand rather than every frame.
+
+Engine automatically handles initialization and cleanup during proxy creation and destruction, but requesting an update when a proxy property changes is the programmer's responsibility. Whenever the proxy requires a GPU update due to an internal structure change, it is required to notify the renderer via scene update requests, forcing the engine to rebuild the uniform buffer parameters from the object and pass the generated payload to the GPU.
+
+As it is mentioned above when per-object clip plane parameters change on a source component, the component updates or reacreates it scene proxy yet the proxy doesn't send
+the updated information to the GPU, in fact it does not send anything about per-object clip plane parameters at this moment. 
+
+It this step we are going to make the engine recreate a new uniform puffer parameters when any of the per-object clip plane parameters changes. 
+Engine has two functions to 
+
+Two functions are 
+Per-object clip planes are 
+Since per-object clip plane parameters requires the GPU to update 
+
+ Primitive scene proxies generates <CodeInline>FPrimitiveUnfiromShaderParameters</CodeInline> as their shards. This object is a POD type like other shards and contains rendering releated properties of the proxy in a much compact way. 
 
 These objects are then used to update the scene on the GPU side. Since this process has a significant performance cost unreal does not do it unless it is necessary. 
 It is automatically done by the engine when a proxys is created or destroyed, yet updating the scene when a property of the proxy changes is completely responsibility of the programmer. When it is decided that uniform buffer update is required it is as easy as calling <CodeInline>RequiresUniformBufferUpdate</CodeInline> to request unreal to create 
