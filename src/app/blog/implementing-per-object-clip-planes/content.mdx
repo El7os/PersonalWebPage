@@ -702,7 +702,7 @@ later would clip the object against a stale plane.
 At this point, primitive scene proxies are fully synchronized with the per-object clip plane state of their source components.
 However, this information is not yet useful; it resides entirely on the CPU and has not been transmitted to the GPU.
 
-Unreal Engine handles most of the heavy lifting of this task yet it still requires some modifications to achieve our goal 
+Unreal Engine handles most of the heavy lifting of this task yet it still requires some modifications to achieve our goal.
 But before, gaining some insights about how Unreal's information pipeline helps clarifying the next steps.
 
 Unreal maintains a copy of the world state on the GPU, often called the GPU scene. The core challange of this system is keeping the GPU Scene synchronized with the CPU game world without introducing performance bottlenecks. Unreal solves this problem using an incremental update strategy smiliar to scene proxies.
@@ -723,33 +723,22 @@ runtime-updatable property (such as Custom Primitive Data) in your version and f
 
 ### Marking The Proxies
 
-Unreal generates uniform buffer parameter payloads from the objects in the scene. Different types of objects requires different type and amount of data to be sent to the GPU in order to be replicated corretly, hence the uniform buffer parameters retreived from each object type is different. For example a view produces a 
-<CodeInline>FViewUniformShaderParameters</CodeInline> while <CodeInline>FSceneTextureUniformParameters</CodeInline> is produced to represent scene textures like depth and base color buffers. Needles to say primitive scene proxies has its own render state object type, it is called <CodeInline>FPrimitiveUniformShaderParameters</CodeInline>. 
+Unreal generates uniform buffer parameter payloads from the objects in the scene. Different types of objects require different type and amount of data in order to be replicated corretly, hence the uniform buffer parameters retreived from each object type is different. For example a view produces a 
+<CodeInline>FViewUniformShaderParameters</CodeInline> while <CodeInline>FSceneTextureUniformParameters</CodeInline> is produced to represent scene textures like depth and base color buffers. Needles to say primitive scene proxies has its own uniform buffer parameter type, it is called <CodeInline>FPrimitiveUniformShaderParameters</CodeInline>. 
 
 Like other shader parameter structures, it is a POD type that encapsulates the source object's rendering properties into a compact, cache-friendly layout.
 These structures are used to maintain GPU Scene state. Because serializing and transmitting uniform buffer data carries a performance overhead, Unreal Engine updates them on-demand rather than every frame.
 
 Engine automatically handles initialization and cleanup during proxy creation and destruction, but requesting an update when a proxy property changes is the programmer's responsibility. Whenever the proxy requires a GPU update due to an internal structure change, it is required to notify the renderer via scene update requests, forcing the engine to rebuild the uniform buffer parameters from the object and pass the generated payload to the GPU.
 
-As it is mentioned above when per-object clip plane parameters change on a source component, the component updates or reacreates it scene proxy yet the proxy doesn't send
-the updated information to the GPU, in fact it does not send anything about per-object clip plane parameters at this moment. 
+When per-object clip plane parameters changed on a source component, the component updates or reacreates it scene proxy but the proxy doesn't send
+the updated information to the GPU, in fact it does not send anything about per-object clip plane parameters at this moment. In this step we are going to make the engine recreate a new uniform puffer parameters when any of the per-object clip plane parameters changes. 
 
-It this step we are going to make the engine recreate a new uniform puffer parameters when any of the per-object clip plane parameters changes. 
-Engine has two functions to 
+Engine has two functions to achieve this goal
+**RequestUniformBufferUpdate** : Tells the engine that this primitive requires its uniform buffer parameters to be recreated.
+**RequestGPUSceneUpdate** : Tells the engine that this this primitive requires its generated uniform buffers to sent to the GPU.
 
-Two functions are 
-Per-object clip planes are 
-Since per-object clip plane parameters requires the GPU to update 
-
- Primitive scene proxies generates <CodeInline>FPrimitiveUnfiromShaderParameters</CodeInline> as their shards. This object is a POD type like other shards and contains rendering releated properties of the proxy in a much compact way. 
-
-These objects are then used to update the scene on the GPU side. Since this process has a significant performance cost unreal does not do it unless it is necessary. 
-It is automatically done by the engine when a proxys is created or destroyed, yet updating the scene when a property of the proxy changes is completely responsibility of the programmer. When it is decided that uniform buffer update is required it is as easy as calling <CodeInline>RequiresUniformBufferUpdate</CodeInline> to request unreal to create 
-the shard from the proxy and resend it to the gpu.
-
-When per-object clip plane parameters changes on the source component it updates the scene proxy, or it recreates in case of editor. Yet this information never arrives to the gpu. The proxy should be marked as <CodeInline>RequiresUniformBufferUpdate</CodeInline> so that the engine recreates the uniform buffer parameters from the component so the parameters can be passed to the GPU to update the scene there. 
-
-Inspect the changes in the following code. 
+With this functions provided primitive scene proxy update code can be changed to notify the scene about it changes like the following
 
 <CodeBlock
   code={`
@@ -789,10 +778,193 @@ void FPrimitiveSceneProxy::SetPerObjectClipPlane_RenderThread(const FVector4& Cl
   filename="PrimitiveSceneProxy.cpp"
 />
 
-These functions are updated so that they check whehter the current state of the proxy has changed and marks the proxy if so. Thus, it enforces the engine to recreate the
-uniform buffer shader parameters generated by this proxy. 
-
 ### POD Data Creation
+
+With the recent changes, the engine now recreates a <CodeInline>FPrimitiveUniformShaderParameters</CodeInline> instance from the proxy and resends it to the GPU to update the GPU scene. But currently <CodeInline>FPrimitiveUniformShaderParameters</CodeInline> does not contain any information releated to per-object clip plane state about the source component.
+
+Solving this issue requires minimal changes on Unreal's pipeline of <CodeInline>FPrimitiveUniformShaderParameters</CodeInline> creation. All starts with a call to function
+<CodeInline>FPrimitiveSceneProxy::UpdateUniformBuffer</CodeInline>. This function generates a new payload and updates the uniform buffer. 
+
+Let us inspect the code
+
+<CodeBlock
+  code={`
+void FPrimitiveSceneProxy::UpdateUniformBuffer(FRHICommandList& RHICmdList)
+{
+  // stat disabled by default due to low-value/high-frequency
+  //QUICK_SCOPE_CYCLE_COUNTER(STAT_FPrimitiveSceneProxy_UpdateUniformBuffer);
+
+  // Skip expensive primitive uniform buffer creation for proxies whose vertex factories only use GPUScene for primitive data
+  if (DoesVFRequirePrimitiveUniformBuffer())
+  {
+    // Update the uniform shader parameters.
+    FPrimitiveUniformShaderParametersBuilder Builder = FPrimitiveUniformShaderParametersBuilder{}; 
+    BuildUniformShaderParameters(Builder); 
+
+    FPrimitiveUniformShaderParameters PrimitiveParams = Builder.Build();
+
+    check(UniformBuffer);
+    UniformBuffer.UpdateUniformBufferImmediate(RHICmdList, PrimitiveParams); //Uniform buffer gets updated. 
+  }
+}
+
+`}
+  filename="PrimitiveSceneProxy.cpp"
+/>
+
+Unreal uses a builder pattern while deriving a uniform shader parameter payload object from a proxy. The only responsibility of these specialized objects is having a proxy as input and generating a uniform shader parameter payload as its output. Different proxies requires different payloads and it is also needed to have different builders to create those payloads. <CodeInline>FPrimitiveUniformShaderParametersBuilder</CodeInline> is the responsible builder type for creating uniform parameter buffers for primitive scene proxies.They are basically, short-lived object responsible for creating and configuring the <CodeInline>FPrimitiveUniformShaderParameters</CodeInline>.
+
+It creates a builder instance and then sets it up the builder by calling <CodeInline>FPrimitiveSceneProxy::BuildUniformShaderParameters</CodeInline>. This function further tailores the builder with the current status of the proxy.After that is done, the builder is asked to generate a new <CodeInline>FPrimitiveUniformShaderParameters</CodeInline> insance. It reflects the changes made on itself to the payload. Lastly this payload is used to update the uniform buffer.
+
+The builders plays a crucial role here and they are the first to change if we want to insert our parmaters into uniform buffer payload. 
+<CodeInline>FPrimitiveUniformShaderParametersBuilder</CodeInline> has a lot of functionality inside but only a few of them are relevant to the implementation. With that in mind its class layout can be simplified as the following:
+
+<CodeBlock
+  code={`
+struct FPrimitiveUniformShaderParametersBuilder
+{
+public:
+    inline FPrimitiveUniformShaderParametersBuilder& Defaults()
+    {
+        //... Sets the properties to its default values.
+    }
+
+    // Helper macro to define setters easily. Directly sets a variable on the FPrimitiveUniformShaderParameters instance it generates. 
+    #define PRIMITIVE_UNIFORM_BUILDER_METHOD(INPUT_TYPE, VARIABLE_NAME) \\
+        inline FPrimitiveUniformShaderParametersBuilder& VARIABLE_NAME(INPUT_TYPE In##VARIABLE_NAME) { Parameters.VARIABLE_NAME = In##VARIABLE_NAME; return *this; }
+
+    // Helper macro to define a setter for a boolean. Notice, it changes the value of a member bool rather than the FPrimitiveUniformShaderParameters instance.
+    #define PRIMITIVE_UNIFORM_BUILDER_FLAG_METHOD(INPUT_TYPE, VARIABLE_NAME) \\
+        inline FPrimitiveUniformShaderParametersBuilder& VARIABLE_NAME(INPUT_TYPE In##VARIABLE_NAME) { b##VARIABLE_NAME = In##VARIABLE_NAME; return *this; }
+
+    //... Getters and Setters for individual components.
+
+    FPrimitiveUniformShaderParameters Build() 
+    {
+      //... Builds the payload
+    }
+
+private:
+
+
+    // This is the actual payload builder generates. It actually reflects the changes we made b 
+    FPrimitiveUniformShaderParameters Parameters;
+}
+`}
+  filename="PrimitiveUniformShaderParameters.h"
+/>
+
+As you can see above the builder contains a <CodeInline>FPrimitiveUniformShaderParameters</CodeInline> instance locally. When a builder is created it automatically creates
+a new payload instance. Then this instance gets changed to reflect the state of the proxy as the setter functions gets called. The generall pattern here is to 
+define the variables in <CodeInline>FPrimitiveUniformShaderParameters</CodeInline>, then define a setter in the builder that changes the value of that variable by using the given value. Actually since this is a frequently used pattern, Unreal is defined a macro to make it easier. 
+
+<CodeBlock
+  code={`
+    #define PRIMITIVE_UNIFORM_BUILDER_METHOD(INPUT_TYPE, VARIABLE_NAME) \\
+        inline FPrimitiveUniformShaderParametersBuilder& VARIABLE_NAME(INPUT_TYPE In##VARIABLE_NAME) { Parameters.VARIABLE_NAME = In##VARIABLE_NAME; return *this; }
+`}
+  filename=""
+/>
+
+In the following instance this macro is used to generate a setter function which sets the <CodeInline>PrimitiveComponentId</CodeInline> of type <CodeInline>uint32</CodeInline>
+directly in <CodeInline>FPrimitiveUniformShaderParameters</CodeInline>
+
+<CodeBlock
+  code={`
+  PRIMITIVE_UNIFORM_BUILDER_METHOD(uint32,      PrimitiveComponentId);
+
+  // Expands to 
+  inline FPrimitiveUniformShaderParametersBuilder& PrimitiveComponentId(uint32 InPrimitiveComponentId)
+  {
+      Parameters.PrimitiveComponentId = InPrimitiveComponentId;
+      return *this;
+  }
+
+`}
+  filename=""
+/>
+
+This doesn't hold for boolean variables. The main reason behind this is constructing <CodeInline>FPrimitiveUniformShaderParameters</CodeInline> instances as densly as possible since having less bytes to send makes it faster. Having individual boolean variables inside <CodeInline>FPrimitiveUniformShaderParameters</CodeInline> would waste 7 bits per boolean variable as one bit is enough. Unreal alloces a special variable inside <CodeInline>FPrimitiveUniformShaderParameters</CodeInline> named as <CodeInline>Flags</CodeInline> for this purpose. It is a basic unsigned 32-bits integer and its each bit is used to store a different boolean flag just to later be unpacked by the GPU.
+
+Unreal defines the boolean variable inside of the builder and then defines a setter changing the value of that property. Those values is then embedded into the <CodeInline>Flags</CodeInline> variable defined in <CodeInline>FPrimitiveUniformShaderParameters</CodeInline> as it builds the payload. 
+
+<CodeBlock
+  code={`
+struct FPrimitiveUniformShaderParametersBuilder
+{
+public:
+    inline FPrimitiveUniformShaderParametersBuilder& Defaults()
+    {
+        //...
+        bMyBoolean = false;
+    }
+
+    // Helper macro to define a setter for a boolean. Notice, it changes the value of a member bool rather than the FPrimitiveUniformShaderParameters instance.
+    #define PRIMITIVE_UNIFORM_BUILDER_FLAG_METHOD(INPUT_TYPE, VARIABLE_NAME) \\
+        inline FPrimitiveUniformShaderParametersBuilder& VARIABLE_NAME(INPUT_TYPE In##VARIABLE_NAME) { b##VARIABLE_NAME = In##VARIABLE_NAME; return *this; }
+
+    //...
+
+    PRIMITIVE_UNIFORM_BUILDER_FLAG_METHOD(bool, MyBoolean);
+
+    /**
+    Expands to the following
+    inline FPrimitiveUniformShaderParametersBuilder& MyBoolean(bool InMyBoolean) { bMyBoolean = InMyBoolean; return *this; }
+    */
+
+    FPrimitiveUniformShaderParameters Build() 
+    {
+      //... Builds the payload
+      Parameters.Flags |= bMyBoolean ? BOOLEAN_INDEX_IN_FLAGS : 0u;
+    }
+
+private:
+
+    FPrimitiveUniformShaderParameters Parameters;
+
+    bool bMyBoolean;
+}
+`}
+  filename="PrimitiveUniformShaderParameters.h"
+/>
+
+
+This covers the whole path of <CodeInline>FPrimitiveUniformShaderParameters</CodeInline> creation for this implementation. It is to do the same for <CodeInline>PerObjectClipPlane</CodeInline> and <CodeInline>bPerObjectClipPlaneEnabled</CodeInline> variables stored inside of the proxy. 
+
+#### Storing <CodeInline>PerObjectClipPlane</CodeInline>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 As it mentioned above unreal derives a POD structure named <CodeInline>FPrimitiveUniformShaderParameters</CodeInline>. It is a densly packed information only object and the 
 final stop of the rendering data before getting serialized and sent out to the GPU. With the recent code changes, unreal rebuilds a <CodeInline>FPrimitiveUniformShaderParameters</CodeInline> instance when per-object clip plane parameters changes along with standart <CodeInline>FPrimitiveSceneProxy</CodeInline> creation or update paths. However the generated <CodeInline>FPrimitiveUniformShaderParameters</CodeInline> does not create and information about per-object clip plane parameters. It is required to extend this structure to contain those information as well.
