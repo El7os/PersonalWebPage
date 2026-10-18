@@ -87,6 +87,7 @@ export default function ReadingProgress() {
 
     return (
         <div
+            data-reading-progress
             role="progressbar"
             aria-label="Reading progress"
             aria-valuemin={0}

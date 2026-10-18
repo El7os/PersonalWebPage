@@ -27,15 +27,15 @@ const CUBE_SIZE: Record<number, number> = {
   6: 8,
 };
 
-/** Indentation (px) in expanded mode keyed by level. */
-const INDENT: Record<number, number> = {
-  1: 0,
-  2: 12,
-  3: 24,
-  4: 32,
-  5: 40,
-  6: 48,
-};
+/** Indentation (px) added per nesting level in expanded mode. */
+const INDENT_STEP = 16;
+
+const NAV_HEIGHT     = 70;  // px – fixed top nav
+const SCROLL_PADDING = 16;  // px – breathing room above a heading after jumping to it
+
+/** Height of the sticky reading-progress bar, which sits right below the nav. */
+const progressBarHeight = () =>
+  document.querySelector<HTMLElement>('[data-reading-progress]')?.offsetHeight ?? 0;
 
 // ─── Component ────────────────────────────────────────────────────────────────
 
@@ -108,7 +108,7 @@ export default function TableOfContents() {
           setActiveId(best);
         }
       },
-      { rootMargin: '-70px 0px -60% 0px', threshold: 0 }
+      { rootMargin: `-${NAV_HEIGHT + progressBarHeight()}px 0px -60% 0px`, threshold: 0 }
     );
 
     headings.forEach(({ id }) => {
@@ -149,14 +149,18 @@ export default function TableOfContents() {
   const scrollTo = (id: string) => {
     const el = document.getElementById(id);
     if (!el) return;
-    const navHeight = 70;
-    const y = el.getBoundingClientRect().top + window.scrollY - navHeight - 16;
+    // Land the heading just below the nav + sticky progress bar instead of behind them.
+    const offset = NAV_HEIGHT + progressBarHeight() + SCROLL_PADDING;
+    const y = el.getBoundingClientRect().top + window.scrollY - offset;
     window.scrollTo({ top: y, behavior: 'smooth' });
   };
 
   // ── 5. Render ──────────────────────────────────────────────────────────────
 
   const panelWidth = collapsed ? COLLAPSED_WIDTH : width;
+
+  // Indent relative to the shallowest heading so the top level starts flush.
+  const minLevel = headings.reduce((m, h) => Math.min(m, h.level), 6);
 
   return (
     <>
@@ -261,6 +265,7 @@ export default function TableOfContents() {
                     <li key={h.id}>
                       <button
                         onClick={() => scrollTo(h.id)}
+                        title={h.text}
                         style={{
                           display:     'block',
                           width:       '100%',
@@ -269,7 +274,7 @@ export default function TableOfContents() {
                           border:      'none',
                           borderLeft:  `2px solid ${isActive ? 'var(--accent-color)' : 'transparent'}`,
                           borderRadius:'0 6px 6px 0',
-                          padding:     `0.35rem 0.6rem 0.35rem ${INDENT[h.level] + 8}px`,
+                          padding:     `0.35rem 0.6rem 0.35rem ${(h.level - minLevel) * INDENT_STEP + 8}px`,
                           cursor:      'pointer',
                           color:       isActive ? 'var(--accent-color)' : 'rgba(255,255,255,0.55)',
                           fontSize:    h.level <= 2 ? '0.82rem' : '0.78rem',
@@ -277,7 +282,9 @@ export default function TableOfContents() {
                           lineHeight:  1.4,
                           transition:  'all 0.2s ease',
                           marginBottom:'2px',
-                          wordBreak:   'break-word',
+                          whiteSpace:  'nowrap',
+                          overflow:    'hidden',
+                          textOverflow:'ellipsis',
                         }}
                         onMouseOver={e => {
                           if (!isActive) e.currentTarget.style.color = '#fff';
