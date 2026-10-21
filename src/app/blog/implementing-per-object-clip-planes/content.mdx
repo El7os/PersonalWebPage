@@ -1284,6 +1284,81 @@ void FPrimitiveSceneProxy::BuildUniformShaderParameters(FPrimitiveUniformShaderP
 
 ### <CodeInline>FPrimitiveUniformShaderParameters</CodeInline> Serialization:
 
+<CodeInline>FPrimitiveSceneShaderData::Setup</CodeInline> function gets called in order to serialize the <CodeInline>FPrimitiveUniformShaderParameters</CodeInline> to a stream of <CodeInline>FVector4f</CodeInline> elements. This function takes a <CodeInline>FPrimitiveUniformShaderParameters</CodeInline> instance and a pointer to <CodeInline>FVector4f</CodeInline> array. It serializes the payload into that array.
+
+ <CodeBlock
+  code={`
+void FPrimitiveSceneShaderData::Setup(const FPrimitiveUniformShaderParameters& PrimitiveUniformShaderParameters, FVector4f* RESTRICT OutData)
+{
+  static_assert(NUM_LIGHTING_CHANNELS == 3, "The FPrimitiveSceneShaderData packing currently assumes a maximum of 3 lighting channels.");
+
+  // Note: layout must match GetPrimitiveData in usf
+
+  Store4(OutData, 0,
+    PrimitiveUniformShaderParameters.Flags,
+    PrimitiveUniformShaderParameters.InstanceSceneDataOffset,
+    PrimitiveUniformShaderParameters.NumInstanceSceneDataEntries,
+    (uint32)PrimitiveUniformShaderParameters.SingleCaptureIndex | ((PrimitiveUniformShaderParameters.VisibilityFlags & 0xFFFFu) << 16u));
+
+  Store4(OutData, 1,
+    PrimitiveUniformShaderParameters.PositionHigh.X,
+    PrimitiveUniformShaderParameters.PositionHigh.Y,
+    PrimitiveUniformShaderParameters.PositionHigh.Z,
+    PrimitiveUniformShaderParameters.PrimitiveComponentId);
+
+  // Pack these matrices into the buffer as float3x4 transposed
+  StoreTransposed(OutData, 2, PrimitiveUniformShaderParameters.LocalToRelativeWorld);
+  StoreTransposed(OutData, 5, PrimitiveUniformShaderParameters.RelativeWorldToLocal);
+  StoreTransposed(OutData, 8, PrimitiveUniformShaderParameters.PreviousLocalToRelativeWorld);
+  StoreTransposed(OutData, 11, PrimitiveUniformShaderParameters.PreviousRelativeWorldToLocal);
+  StoreTransposed(OutData, 14, PrimitiveUniformShaderParameters.WorldToPreviousWorld);
+
+  OutData[17] = FVector4f(PrimitiveUniformShaderParameters.InvNonUniformScale, PrimitiveUniformShaderParameters.ObjectBoundsX);
+  OutData[18] = PrimitiveUniformShaderParameters.ObjectWorldPositionHighAndRadius;
+
+  //...
+
+  Store4(OutData, 33,
+    PrimitiveUniformShaderParameters.MeshPaintTextureDescriptor.X,
+    PrimitiveUniformShaderParameters.MeshPaintTextureDescriptor.Y,
+    0u, 0u);
+  
+  // Set all the custom primitive data float4. This matches the loop in SceneData.ush
+  const int32 CustomPrimitiveDataStartIndex = 35;
+  for (int32 DataIndex = 0; DataIndex < FCustomPrimitiveData::NumCustomPrimitiveDataFloat4s; ++DataIndex)
+  {
+    OutData[CustomPrimitiveDataStartIndex + DataIndex] = PrimitiveUniformShaderParameters.CustomPrimitiveData[DataIndex];
+  }
+}
+`}
+  filename="PrimitiveUniformShaderParameters.h"
+/>
+
+It basically stores the elements into the out array by manually indicating which information should be put where. <CodeInline>bPerObjectClipPlaneEnabled</CodeInline> requires no change since it is stored in <CodeInline>Flags</CodeInline> variable and it gets packed the engine core. However, this is not true for <CodeInline>PerObjectClipPlane</CodeInline>, its packing should be handled manually. 
+
+<Notification>
+The memory layout information is actually crucial when it comes to unpacking the information on the GPU side. GPU receives the information as a <CodeInline>FVector4f</CodeInline> array without information about information layout. 
+A raw memory like this be interpretes as many things. For instance a memory of 8 bits can be either interpreted one unsigned integer or 8 different boolean flags.
+
+<p align="center">
+  <img src="/blog/implementing-per-object-clip-planes/Image_MemoryInterpretation.svg" alt="Memory Interpretation"></img>
+</p>
+
+Thefore nowing the exact layout of the information is important, otherwise it would be playing lottery with the memory.
+This implies a hidden memory contract between the two processing units which enforces the packing and unpacking behavior to be identical but in reversed directions (one writes and the other one reads) .
+
+To ensure that we do not break the contract we are going to update the unpacking code on the GPU side in the next step right after updating packing behavior.
+
+</Notification>
+
+Even though we can put it anywhere in the array as long as we take the responsiblity of doing the same on the GPU side. 
+
+
+ 
+
+What this basically do is basically 
+
+Extended <CodeInline>FPrimitiveUniformShaderParameters</CodeInline> cannot be correctly serialized as its internal layout is changed. Current s 
 After constructing the payload it is not required to update the serialization process. This is especially required since we 
 
 
