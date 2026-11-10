@@ -1,22 +1,22 @@
 ## Introduction
 In modern real-time rendering, specialized visual effects, gameplay mechanics, and visualization tools often require geometry to be dynamically clipped.
-While Unreal Engine 5 provides robust support for global clip planes—typically utilized for planar water reflections—it
+While Unreal Engine 5 supports global clip planes—typically utilized for planar reflections, such as water surfaces or mirrors—it
 lacks out-of-the-box support for isolating this behavior on a per-object basis.
 
-When global clip planes are enabled, Unreal Engine uses one of the hardware's clip-distance slots to discard geometry before rasterization.
-The plane's position and orientation are defined per camera, which is ideal for reflections; however, this applies uniformly
-to every object that the camera draws. While different cameras can carry different global planes, every primitive within a single
-view shares the same cutting boundary. This global scope is the exact bottleneck our implementation addresses.
+When the global clip plane is enabled, Unreal Engine employs one of the hardware's clip-distance slots to discard geometry before rasterization.
+The plane's position and orientation are defined per view, which is ideal for reflections; however, the plane applies uniformly
+to every object rendered in that view. Different views can carry different planes, but every primitive within a single
+view shares the same cutting boundary. This global scope is the exact limitation our implementation addresses.
 
-Implementing per-object clip planes allows developers to slice, hollow out, or selectively cull geometry on specific primitives without
-affecting adjacent elements in the scene. This capability is crucial for applications ranging from architectural visualizations and medical
+Per-object clip planes allow developers to slice geometry on specific primitives without
+affecting adjacent elements in the scene. This is useful in applications ranging from architectural visualization and medical
 imaging to sci-fi cross-section effects.
 
-The Per-Object Clip Plane implementation described here is positioned as an extension to the existing global clip plane rather than a discrete implementation.
-It utilizes the same underlying hardware feature and identical dot-product mathematics, but introduces a separate control lane that artists and gameplay systems
-can drive independently. While the framework presented in this document serves as an extension, it is possible to construct a fully standalone implementation as well.
+Rather than a standalone feature, the per-object clip plane described here is an extension of the existing global clip plane.
+It relies on the same hardware feature and the same dot-product math, but adds a separate control path that artists and gameplay systems
+can drive independently. A fully standalone implementation is also possible, but it is outside the scope of this article.
 
-Before diving into the engine source code to integrate this extension, a close examination of how graphics hardware natively processes clipping boundaries under the hood is required.
+Before diving into the engine source code, let us take a close look at how graphics hardware handles clipping under the hood.
 
 <br></br>
 
@@ -29,39 +29,36 @@ Before diving into the engine source code to integrate this extension, a close e
 ## Clip Planes and Where to Find Them
 
 In computer graphics, rendering hardware relies on a dedicated set of distances to determine whether geometry should be preserved or clipped.
-Rather than executing software-side culling algorithms, modern graphics APIs (such as DirectX, Vulkan, and OpenGL) natively
-expose specialized hardware slots allocated for these clip distances, typically supporting a minimum of six to eight simultaneously.
+Rather than leaving this to software-side clipping algorithms, modern graphics APIs (such as DirectX, Vulkan, and OpenGL) natively
+expose specialized hardware slots for these clip distances, typically supporting at least eight simultaneously.
 
-During the vertex processing stage of the rendering pipeline, the vertex shader writes a distance value into each active slot, and the hardware evaluates them.
+During the vertex processing stage, the vertex shader writes a distance value into each active slot.
 If a vertex yields a negative clip distance, the hardware rasterizer clips the primitive along the boundary where the interpolated distance crosses zero, cleanly discarding non-visible
-fragments before they ever reach the pixel shader. Essentially, the hardware monitors each active clip distance slot and discards a region of a triangle
-if even a single distance value falls below zero there.
+fragments before they ever reach the pixel shader. In short, the hardware checks every active clip distance slot and discards any region of a triangle
+where even a single distance falls below zero.
 
 Generally, developers use a plane equation to derive this clip distance value. An arbitrary plane is defined, and the clip distance
 is calculated as the signed distance from the vertex to that plane. If the vertex lies in the positive half-space—the side the plane
-normal points toward—the distance value is positive and the geometry is preserved. Conversely, if it lies on the opposite side, the distance
-value becomes negative, triggering the hardware to clip the geometry.
+normal points toward—the distance is positive and the geometry is preserved. If it lies on the opposite side, the distance
+becomes negative, causing the hardware to clip the geometry.
 
 <MathBlock
   latex="Clip Distance = SignedDistanceToPlane(Q)"
-  caption="Setting the clip distance to the signed distance of point Q to a plane"
+  caption="Setting the clip distance to the signed distance from point Q to a plane"
   size="large"
 />
 
-Because using a plane equation to derive these values is the industry-standard approach, this hardware feature is universally referred to as "clip planes."
+The name comes from older graphics APIs, where developers handed plane equations directly to the hardware. Modern APIs generalized this to
+arbitrary distances, but since planes remain the most common use, the feature is still commonly referred to as "clip planes."
 
-Out of the box, Unreal Engine supports a global clip plane feature. When enabled, the engine evaluates every vertex against a single
-plane defined on a per-camera basis to derive its clip distance, and writes the result into the first clip distance slot. The term "global" reflects the fact that this
-boundary applies uniformly to every object rendered by that specific camera—though different cameras can maintain entirely distinct
-global clip planes.
+Unreal Engine's global clip plane is built on exactly this mechanism. When enabled, the engine evaluates every vertex in the passes that support it against a single
+plane defined per view, and writes the result into the first clip distance slot.
 
-The objective of this implementation is to extend this capability to a per-object basis: utilizing the exact same
-underlying hardware mechanics, but defining the clip plane per primitive so that individual objects can maintain
-their own unique cutting boundaries. Because modern graphics APIs support multiple concurrent clip distances, assigning the Per-Object Clip Plane to a dedicated hardware slot
-ensures seamless coexistence with the native global clip plane: water reflections retain their camera-driven plane, while individual objects can carry their own.
+Our implementation follows the same approach, but defines the plane per primitive instead of per view. Since modern graphics APIs support
+multiple concurrent clip distances, the per-object clip plane gets a dedicated slot of its own, allowing it to coexist with the global clip plane:
+planar reflections keep their view-driven plane, while individual objects carry their own.
 
-Before diving into the implementation, it is important to understand how clip planes are
-represented and how the signed distance is calculated.
+First, though, we need to understand how clip planes are represented and how the signed distance is calculated.
 
 ### Compact Plane Representation
 
@@ -81,7 +78,7 @@ Where $\vec{N}$ is the surface normal vector of the plane and $\vec{P}_0$ is an 
 </p>
 
 
-Evaluating this formulation indicates that representing a 3D plane in world space requires two <CodeInline>FVector3f</CodeInline>s:
+Looking at this equation, we can see that representing a 3D plane in world space requires two <CodeInline>FVector3f</CodeInline>s:
 one for the plane normal ($\vec{N}$) and another for the surface point ($\vec{P}_0$).
 
 
@@ -97,7 +94,7 @@ struct FMyPlane
 />
 
 However, it is entirely possible to reduce the memory footprint of a plane by representing it in a much more compact form. This special form requires
-the surface point $\vec{P}_0$ to be selected as follows:
+the plane normal $\vec{N}$ to be unit length, and the surface point $\vec{P}_0$ to be selected as follows:
 
 <MathBlock
   latex="\vec{P}_0 = D_P \cdot \vec{N}"
@@ -111,7 +108,7 @@ Geometrically, this approach defines $\vec{P}_0$ as the intersection point betwe
   <img src="/blog/implementing-per-object-clip-planes/Image_Plane_WithWorldOrigin.svg" alt="PlaneWithWorldOrigin"></img>
 </p>
 
-Under these conditions, a plane can be represented by the plane normal $\vec{N}$ and the plane distance $D_P$ alone, which fits into a single
+Under these conditions, a plane can be represented by the plane normal $\vec{N}$ and the plane distance $D_P$ alone, which fits into one
 <CodeInline>FVector4f</CodeInline>: the first three elements $(X, Y, Z)$ store the plane normal and the last element ($W$) stores $D_P$.
 
 <CodeBlock
@@ -124,19 +121,24 @@ struct FMyCompactPlane
   filename=""
 />
 
-This compact representation reduces the memory footprint of each plane by two floating-point values—a 33% reduction in memory overhead per instance. Furthermore, storing the plane in a single 4D vector enables GPU-friendly dot-product instructions during distance evaluation, as the next section shows.
+<Notification>
+In fact, Unreal's own <CodeInline>FPlane</CodeInline> uses exactly this representation: it stores the plane normal in $X$, $Y$, $Z$ and $D_P$ in $W$,
+and <CodeInline>FPlane::PlaneDot</CodeInline> returns $\vec{N} \cdot \vec{P} - W$.
+</Notification>
+
+This compact representation reduces the memory footprint of each plane by two floating-point values—a 33% reduction in memory per plane. Furthermore, storing the plane in a 4D vector allows the distance to be evaluated with a single GPU-friendly dot product, as the next section shows.
 
 ### Evaluating Point-Plane Distance (The Magic Dot Product)
 
 When clipping vertices along a plane, calculating the signed distance from a point to that
-plane is an unavoidable necessity. While there are multiple ways to interpret this mathematically,
+plane is unavoidable. While there are multiple ways to approach this mathematically,
 one specific geometric interpretation proves incredibly elegant for shader execution.
 
-To establish this calculation within the rendering pipeline, the core variables and objectives are defined as follows:
+Let us first define the core variables:
 
 * $\vec{Q}$: The point of interest, representing the vertex position in world space.
 * $D_Q$: The signed distance of the query point $\vec{Q}$ from the clipping plane,
-  which is going to be referred to as the clip distance moving forward. The primary goal is to solve for this value.
+  which we will refer to as the clip distance from here on. The primary goal is to solve for this value.
 * $D_P$: The scalar distance satisfying the equation $\vec{P}_0 = D_P \cdot \vec{N}$. In other words, it represents the signed perpendicular distance of the plane from the world origin along the normal vector.
 
 The shortest distance from an arbitrary point to a plane is always measured along a path perpendicular to that plane. Because the plane normal $\vec{N}$ is by definition perpendicular
@@ -144,7 +146,7 @@ to the surface, $D_Q$ can be computed by projecting the query point $\vec{Q}$ on
 normal. The difference between this projected distance and the plane's own distance from
 the origin ($D_P$) yields the exact signed distance $D_Q$.
 
-The geometric interpretation is illustrated below:
+The illustration below shows this geometrically:
 
 <p align="center">
   <img src="/blog/implementing-per-object-clip-planes/Image_Plane_Distance.svg" alt="Plane Distance"></img>
@@ -178,15 +180,14 @@ as a homogeneous 4D coordinate, obtained by appending $1$ as its $W$ component.
 Evaluating the dot product of these two 4D vectors directly yields the signed clip
 distance of $\vec{Q}$.
 
-This means that if the $D_P$ term is stored negated, calculating
-the distance of point $\vec{Q}$ from the clip plane is as trivial as evaluating a single dot product between the plane and the point
-represented as a homogeneous 4D coordinate. This is exactly the convention used throughout the rest of this implementation: whenever the plane is packed
+In other words, storing the $D_P$ term negated reduces the whole calculation to one <CodeInline>dot</CodeInline> call in HLSL,
+with no extra subtraction and no special cases. This is exactly the convention used throughout the rest of this implementation: whenever the plane is packed
 into a 4D vector, its $W$ component holds $-D_P$.
 
 ## Implementation Blueprint
 Bridging the gap between gameplay logic and raw hardware clipping requires establishing a unified, sequential data pipeline that spans all the way from a primitive component down to the HLSL vertex shaders.
-A top-down approach is used to trace the data's journey sequentially through Unreal Engine's architectural layers. Along this path, the primary objective is to safely ferry parameters across the
-asynchronous Game Thread and Render Thread boundary without inviting race conditions or memory corruption, before neatly packing them across the CPU-to-GPU memory interface.
+A top-down approach is used to trace the data's journey through Unreal Engine's architectural layers. Along this path, the primary objective is to safely ferry parameters across the
+boundary between the asynchronously running game thread and render thread without inviting race conditions or memory corruption, before neatly packing them for the trip from the CPU to the GPU.
 
 
 <p align="center">
@@ -195,25 +196,27 @@ asynchronous Game Thread and Render Thread boundary without inviting race condit
 
 The journey is split into the following stages, each of which gets its own section below:
 
-1. **Defining the required variables on primitive components** (Game Thread).
-2. **Carrying the information to scene proxies** (Game Thread → Render Thread).
-3. **Modifying the uniform buffers** so they have room to carry the information to the GPU (Render Thread).
-4. **Modifying the uniform buffer encoding and decoding** so that the CPU and the GPU agree on where the data lives (Render Thread → GPU).
-5. **Updating the vertex shaders** to write the per-object clip distance (GPU).
+1. **Extending the primitive component** (game thread): defining the clip plane properties, along with their getters and setters.
+2. **Scene proxies** (game thread → render thread): carrying the information to the render-side mirror of the component, and keeping the two in sync
+   through creation, recreation and in-place updates.
+3. **Sending the data to the GPU** (render thread → GPU): requesting uniform buffer updates, adding the data to the primitive's uniform shader parameters,
+   and serializing them into the stream the GPU receives.
+4. **GPU deserialization** (GPU): unpacking the data on the GPU, so that the CPU and the GPU agree on where it lives.
+5. **Clipping vertices** (GPU): writing the per-object clip distance in the vertex shaders, and making every vertex factory provide the data those shaders need.
 
 
 ## Extending the Primitive Component
 
-Needless to say, primitive components are one of the core objects of Unreal Engine's game world. <CodeInline>UPrimitiveComponent</CodeInline> is the base class for all components
-that possess a visual representation or physical volume in the game world. Therefore, it is selected as the class to host the Per-Object Clip Plane implementation.
+Primitive components are among the core objects of Unreal Engine's game world. <CodeInline>UPrimitiveComponent</CodeInline> is the base class for all components
+that possess a visual representation or physical volume in the game world, which makes it the natural host for the per-object clip plane.
 
-Primitive components play the role of the starting point in this implementation. They define the variables that describe the clip plane, which is later used to derive
-the clipping boundaries for the object.
+Primitive components serve as the starting point of our data pipeline. They define the variables that describe the clip plane, which is later used to clip
+the object.
 
-Since the Per-Object Clip Plane feature is defined on a per-object basis and is not required to be enabled on every primitive
-component in the scene, a boolean flag indicating whether the clip plane is enabled for that primitive is required in addition to the plane itself.
+Since not every primitive in the scene needs a clip plane, we also need a boolean flag indicating whether the feature is enabled for that primitive,
+in addition to the plane itself.
 
-With the current setup, the variables to define are the following:
+In summary, the variables to define are the following:
 
 * A boolean flag indicating whether the component has an active per-object clip plane.
 
@@ -221,7 +224,12 @@ With the current setup, the variables to define are the following:
 
 * A floating-point value representing the signed perpendicular distance of the clip plane from the world origin.
 
-Notice that on the component side the plane is stored in its human-friendly form (a normal and a distance). Converting it into the compact, negated form is done later, when the data leaves the component.
+Notice that on the component side the plane is stored in its human-friendly form (a normal and a distance). We convert it into the compact, negated form later, when the data leaves the component.
+
+<Notification emoji="⚠️">
+The normal must never be a zero vector. A zero vector cannot be normalized, so the plane would end up as $(0, 0, 0, -D_P)$ and every vertex
+of the object would get the same clip distance, $-D_P$. With a positive distance the whole object disappears, and with a zero or negative distance nothing is clipped at all.
+</Notification>
 
 <Notification>
 <CodeInline>//...</CodeInline> and other <CodeInline>...</CodeInline> notations are used to denote omitted code that is not relevant
@@ -234,33 +242,33 @@ class UPrimitiveComponent : public USceneComponent ....
 {
     //...
     /*
-    * Set to true if this primitive has a custom clip plane.
+    * Set to true if this primitive has a per-object clip plane.
     * r.AllowGlobalClipPlane must be true to use this feature
     */
     UPROPERTY(EditAnywhere, Category=Rendering)
     bool bPerObjectClipPlaneEnabled = false;
 
     /*
-    * Normal (world space) vector of the custom clipping plane of this primitive.
-    * bPerObjectClipPlaneEnabled should be true to edit this value.
+    * Normal (world space) vector of the per-object clip plane of this primitive.
+    * bPerObjectClipPlaneEnabled must be true to edit this value.
     */
     UPROPERTY(EditAnywhere, Category=Rendering, meta=(EditCondition="bPerObjectClipPlaneEnabled"))
     FVector PerObjectClipPlaneNormal = FVector::UpVector;
 
     /*
-    * The offset of the clipping plane from the world center (0, 0, 0)
-    * bPerObjectClipPlaneEnabled should be true to edit this value.
+    * The offset of the per-object clip plane from the world origin (0, 0, 0)
+    * bPerObjectClipPlaneEnabled must be true to edit this value.
     */
     UPROPERTY(EditAnywhere, Category=Rendering, meta=(EditCondition="bPerObjectClipPlaneEnabled"))
     float PerObjectClipPlaneDistance = 0.0f;
     //...
-}
+};
 `}
   filename="PrimitiveComponent.h"
 />
 
 Properties are not that handy if they cannot be modified at runtime by external code.
-The most straightforward way is to define a set of getters and setters, exposed to Blueprints as well.
+The most straightforward solution is a set of getters and setters, exposed to Blueprints as well.
 
 <CodeBlock
   code={`
@@ -279,20 +287,20 @@ class UPrimitiveComponent : public USceneComponent ....
     UFUNCTION(BlueprintCallable, Category = "Rendering")
     ENGINE_API void SetPerObjectClipPlane(const FVector& PlaneNormal, float PlaneDistance);
 
-    UFUNCTION(BlueprintCallable, Category = "Rendering")
+    UFUNCTION(BlueprintPure, Category = "Rendering")
     bool GetPerObjectClipPlaneEnabled() const
     {
         return bPerObjectClipPlaneEnabled;
     }
 
-    UFUNCTION(BlueprintCallable, Category = "Rendering")
+    UFUNCTION(BlueprintPure, Category = "Rendering")
     void GetPerObjectClipPlane(FVector& PlaneNormal, float& PlaneDistance) const
     {
         PlaneNormal = PerObjectClipPlaneNormal;
         PlaneDistance = PerObjectClipPlaneDistance;
     }
     //...
-}
+};
 
 //PrimitiveComponent.cpp
 void UPrimitiveComponent::SetPerObjectClipPlaneEnabled(bool bValue)
@@ -309,11 +317,11 @@ void UPrimitiveComponent::SetPerObjectClipPlane(const FVector& PlaneNormal, floa
   filename=""
 />
 
-For now the setters only store the new values. They are going to be revisited once the scene proxy is able to receive runtime updates.
+For now the setters only store the new values. We will revisit them once the scene proxy is able to receive runtime updates.
 
 ## Scene Proxies
 
-In Unreal Engine, gameplay logic is executed on the Game Thread (GT), while rendering operations—such as updating vertex buffers and managing textures—occur asynchronously on the Render Thread (RT).
+In Unreal Engine, gameplay logic is executed on the game thread, while rendering operations—such as updating vertex buffers and managing textures—occur asynchronously on the render thread.
 To safely handle this multi-threaded split, the engine creates mirrored representation objects on the render thread for components living on the game thread.
 These objects are known as Scene Proxies.
 
@@ -1669,16 +1677,830 @@ FPrimitiveSceneData GetPrimitiveDataFromUniformBuffer()
 
 #### Reading From Global Shader
 
-This path reads from the globally shared shader resources. It is a little bit tricky since it requires a little bit index arithmatic but most of them is handled by the engine. It start by finding where information of the primitive data starts in the buffer. It used the <CodeInline>PrimitiveId</CodeInline> for this purpose. This value indicates the index of the primitive among all the other primitives constructing the shared buffer. Then it multiplies this value with <CodeInline>PRIMITIVE_SCENE_DATA_STRIDE</CodeInline> which indicates the size of a payload.
+This path reads from the globally shared shader resources. It is a little bit tricky since it requires a little bit index arithmatic but most of them is handled by the engine. It starts by finding where information of the primitive data starts in the buffer. <CodeInline>PrimitiveId</CodeInline> is being used for this purpose. This value indicates the index of the primitive among all the other primitives constructing the shared buffer. Then it gets multiplied by <CodeInline>PRIMITIVE_SCENE_DATA_STRIDE</CodeInline> which indicates the size of a payload.
+
+The resulting value indicates the exact location where the primitive data information is laid. 
+
+<CodeBlock
+  code={`
+uint PrimitiveIndex = PrimitiveId * PRIMITIVE_SCENE_DATA_STRIDE;
+`}
+  filename=""
+/>
+
+Using the actual index the engine starts to read values from the buffer to a newly created <CodeInline>FPrimitiveUniformShaderParameters</CodeInline> instance. Then this instance is returned as the result of the query.
+
+<CodeBlock
+  code={`
+  FPrimitiveSceneData PrimitiveData = (FPrimitiveSceneData)0;
+  // Note: layout must match FPrimitiveSceneShaderData in C++
+  // Relying on optimizer to remove unused loads
+  uint PrimitiveIndex = PrimitiveId * PRIMITIVE_SCENE_DATA_STRIDE;
+  
+  float3 PositionHigh = LoadPrimitivePrimitiveSceneDataElement(PrimitiveIndex, 1).xyz;
+
+  const float4x4 LocalToWorld = transpose(float4x4(
+    LoadPrimitivePrimitiveSceneDataElement(PrimitiveIndex, 2),
+    LoadPrimitivePrimitiveSceneDataElement(PrimitiveIndex, 3),
+    LoadPrimitivePrimitiveSceneDataElement(PrimitiveIndex, 4),
+    float4(0, 0, 0, 1)
+  ));
+
+  const float4x4 PreviousLocalToWorld = transpose(float4x4(
+    LoadPrimitivePrimitiveSceneDataElement(PrimitiveIndex, 8),
+    LoadPrimitivePrimitiveSceneDataElement(PrimitiveIndex, 9),
+    LoadPrimitivePrimitiveSceneDataElement(PrimitiveIndex, 10),
+    float4(0, 0, 0, 1)
+  ));
+
+  //...
+  PrimitiveData.InstanceWPODisableDistanceSquared   = LoadPrimitivePrimitiveSceneDataElement(PrimitiveIndex, 31).z;
+  PrimitiveData.NaniteRayTracingDataOffset      = asuint(LoadPrimitivePrimitiveSceneDataElement(PrimitiveIndex, 31).w);
+  PrimitiveData.MaxWPOExtent              = LoadPrimitivePrimitiveSceneDataElement(PrimitiveIndex, 32).x;
+  PrimitiveData.CustomStencilValueAndMask       = asuint(LoadPrimitivePrimitiveSceneDataElement(PrimitiveIndex, 32).y);
+  PrimitiveData.PixelProgrammableDistanceSquared    = LoadPrimitivePrimitiveSceneDataElement(PrimitiveIndex, 32).z;
+  PrimitiveData.MaterialDisplacementFadeOutSize   = LoadPrimitivePrimitiveSceneDataElement(PrimitiveIndex, 32).w;
+  PrimitiveData.MeshPaintTextureDescriptor      = asuint(LoadPrimitivePrimitiveSceneDataElement(PrimitiveIndex, 33).xy);
+  // NOTE: Please make sure GetPrimitiveDataFromUniformBuffer() gets updated as well when adding new members here
+
+  // TODO: Move to associated array (and editor data) to shrink primitive data and better pack cachelines
+  UNROLL
+  for (uint DataIndex = 0; DataIndex < NUM_CUSTOM_PRIMITIVE_DATA; ++DataIndex)
+  {
+    PrimitiveData.CustomPrimitiveData[DataIndex] = LoadPrimitivePrimitiveSceneDataElement(PrimitiveIndex,  35 + DataIndex);
+  }
+  return PrimitiveData;
+`}
+  filename=""
+/>
+
+We are only going add a few line of code to read our per-object clip plane data into the instance as we did in the second case.
+
+<CodeBlock
+  code={`
+  FPrimitiveSceneData PrimitiveData = (FPrimitiveSceneData)0;
+  // Note: layout must match FPrimitiveSceneShaderData in C++
+  // Relying on optimizer to remove unused loads
+  uint PrimitiveIndex = PrimitiveId * PRIMITIVE_SCENE_DATA_STRIDE;
+  
+  float3 PositionHigh = LoadPrimitivePrimitiveSceneDataElement(PrimitiveIndex, 1).xyz;
+
+  const float4x4 LocalToWorld = transpose(float4x4(
+    LoadPrimitivePrimitiveSceneDataElement(PrimitiveIndex, 2),
+    LoadPrimitivePrimitiveSceneDataElement(PrimitiveIndex, 3),
+    LoadPrimitivePrimitiveSceneDataElement(PrimitiveIndex, 4),
+    float4(0, 0, 0, 1)
+  ));
+
+  const float4x4 PreviousLocalToWorld = transpose(float4x4(
+    LoadPrimitivePrimitiveSceneDataElement(PrimitiveIndex, 8),
+    LoadPrimitivePrimitiveSceneDataElement(PrimitiveIndex, 9),
+    LoadPrimitivePrimitiveSceneDataElement(PrimitiveIndex, 10),
+    float4(0, 0, 0, 1)
+  ));
+
+  //...
+  PrimitiveData.InstanceWPODisableDistanceSquared   = LoadPrimitivePrimitiveSceneDataElement(PrimitiveIndex, 31).z;
+  PrimitiveData.NaniteRayTracingDataOffset      = asuint(LoadPrimitivePrimitiveSceneDataElement(PrimitiveIndex, 31).w);
+  PrimitiveData.MaxWPOExtent              = LoadPrimitivePrimitiveSceneDataElement(PrimitiveIndex, 32).x;
+  PrimitiveData.CustomStencilValueAndMask       = asuint(LoadPrimitivePrimitiveSceneDataElement(PrimitiveIndex, 32).y);
+  PrimitiveData.PixelProgrammableDistanceSquared    = LoadPrimitivePrimitiveSceneDataElement(PrimitiveIndex, 32).z;
+  PrimitiveData.MaterialDisplacementFadeOutSize   = LoadPrimitivePrimitiveSceneDataElement(PrimitiveIndex, 32).w;
+  PrimitiveData.MeshPaintTextureDescriptor      = asuint(LoadPrimitivePrimitiveSceneDataElement(PrimitiveIndex, 33).xy);
+  PrimitiveData.PerObjectClipPlane                    = LoadPrimitivePrimitiveSceneDataElement(PrimitiveIndex, 34).xyzw;
+  // NOTE: Please make sure GetPrimitiveDataFromUniformBuffer() gets updated as well when adding new members here
+
+  // TODO: Move to associated array (and editor data) to shrink primitive data and better pack cachelines
+  UNROLL
+  for (uint DataIndex = 0; DataIndex < NUM_CUSTOM_PRIMITIVE_DATA; ++DataIndex)
+  {
+    PrimitiveData.CustomPrimitiveData[DataIndex] = LoadPrimitivePrimitiveSceneDataElement(PrimitiveIndex,  35 + DataIndex);
+  }
+  return PrimitiveData;
+`}
+  filename=""
+/>
 
 
+## Clipping Vertices
 
-To do that it simply multiplies
-<CodeBlock>PrimitiveId</CodeBlock> , whic e
+All the things we have done get us to this step. Here we are actually starting to clip vertices using our per-object clip plane. 
+As this implementation places it self not as an independent feature but an extension to global clip plane feature of the engine we are going to track down every place the engine utilizes global clip plane and insert our code there. 
+
+But before it is going to be helpfull to gain some insights about a number important aspects regarding the vertices.
+
+### Vertex Factories
+Have you ever thought how it is possible to apply the same basic material to different variations of meshes such as static meshes, landscapes, skeletal meshes or even meshes spawned by the niagara. They have distinctly diverged rendering paths apperantly. Their vertices contains different informations too, yet it is possible to apply the same material to them. 
+
+The magician behind all of these are vertex factories. Unreal uses vertexx factories as a geometry-spesific abstraction layer between the underlying vertex data representation and teh vertex-processing implementation used by the rendering pipeline. Different geometry types can store vertex attributes in different layouts and may require different vertex-processing operations. A vertex factory describes the vertex input requirements and provides the appropriate rendering implementation for that geomerty type.
+
+This allows Unreal's material and shader system to work with a relatively consistent interface without requring materials to directly understand the underlying vertex buffer layout of every geometry type such as static meshes and lanscapes.
+
+Even though they have different responsitibilites to, this is the most relevant to us.
+
+### Helper functions
+
+Since we are going to apply the same clipping logic multiple places let us start by defining some commonly used functions to help us down the line.
+
+<CodeBlock
+  code={`
+  float GetPrimitive_PerObjectClipPlaneEnabledSign_FromFlags(uint Flags)
+{
+  return CondMask(Flags & PRIMITIVE_SCENE_DATA_FLAG_PER_OBJECT_CLIP_PLANE_ENABLED, -1.0f, 1.0f);
+}
+`}
+  filename=""
+/>
+
+<CodeInline>GetPrimitive_PerObjectClipPlaneEnabledSign_FromFlags</CodeInline> checks whether <CodeInline>bPerObjectClipPlaneEnabled</CodeInline> flag is set in given <CodeInline>Flags</CodeInline>. If it is set it returns 1.0, -1.0 otherwise. Notice this function uses the macro
+<CodeInline>PRIMITIVE_SCENE_DATA_FLAG_PER_OBJECT_CLIP_PLANE_ENABLED</CodeInline> we defined to indicate the bit location for <CodeInline>bPerObjectClipPlaneEnabled</CodeInline> flag in <CodeInline>Flags</CodeInline> parameter in CPU.
+
+<CodeBlock
+  code={`
+float GetPrimitive_PerObjectClipEnabledPlaneSign(uint PrimitiveID)
+{
+  return GetPrimitive_PerObjectClipPlaneEnabledSign_FromFlags(GetPrimitiveData(PrimitiveID).Flags);
+}
+`}
+  filename=""
+/>
+
+<CodeInline>GetPrimitive_PerObjectClipEnabledPlaneSign</CodeInline> tries to achieve the same by using the given <CodeInline>PrimitiveID</CodeInline>. It retreives the primitive data corresponding to the <CodeInline>PrimitiveID</CodeInline> first. Then calls the function <CodeInline>GetPrimitive_PerObjectClipPlaneEnabledSign_FromFlags</CodeInline> to determine whether the <CodeInline>bPerObjectClipPlaneEnabled</CodeInline> is set to true for the primitive.
+
+<CodeBlock
+  code={`
+#if VF_USE_PRIMITIVE_SCENE_DATA
+float GetPrimitive_PerObjectClipEnabledPlaneSign(FPrimitiveSceneData SceneData)
+{
+  return GetPrimitive_PerObjectClipPlaneEnabledSign_FromFlags(SceneData.Flags);
+}
+#endif
+`}
+  filename=""
+/>
+
+This one does the same as well but it is encapsulated in <CodeInline>VF_USE_PRIMITIVE_SCENE_DATA</CodeInline> macro to ensure the caller shader has access to <CodeInline>FPrimitiveSceneData</CodeInline>
 
 
-For simplicity we are not going to cover the mobile paths
-We must update <CodeInline>GetPrimitiveDataFromUniformBuffer</CodeInline> and <CodeInline>GetPrimitiveData</CodeInline> to load the clip plane from index 34 and shift the custom primitive data loop to start at index 35:
+### Extending Existing Shaders
 
+This per-object clip plane implementation places itself not as an independent clip plane feature but an extension to the existing global clip plane feature unreal provided.
 
+Thus we are going to inspect the usage of global clip plane in the shaders and extend them with our implementation. These are
 
+* <CodeInline>AnisotropyPassShader.usf</CodeInline>
+* <CodeInline>BasePassVertexShader.usf</CodeInline>
+* <CodeInline>DebugViewModeVertexShader.usf</CodeInline>
+* <CodeInline>DepthOnlyVertexShader.usf</CodeInline>
+* <CodeInline>DistortAccumulateVS.usf</CodeInline>
+* <CodeInline>HitProxyVertexShader.usf</CodeInline>
+* <CodeInline>LightMapDensityShader.usf</CodeInline>
+* <CodeInline>MeshDecals.usf</CodeInline>
+* <CodeInline>PositionOnlyDepthVertexShader.usf</CodeInline>
+* <CodeInline>VelocityShader.usf</CodeInline>
+
+Every one of these shaders handles the global clip plane in the same way, so the changes we make are the same in each of them as well. There are two of them.
+
+The first one is an extra output in the signature of the vertex shader. The global clip plane distance is written to <CodeInline>SV_ClipDistance</CodeInline> (which is the same as <CodeInline>SV_ClipDistance0</CodeInline>). We add a second output bound to <CodeInline>SV_ClipDistance1</CodeInline> for our per-object clip plane. The rasterizer interpolates every clip distance across the triangle and discards the parts where any of them is negative, so the two planes work independently of each other.
+
+The second one is the calculation of the distance itself, right after the global clip plane distance is calculated. If the per-object clip plane is enabled for the primitive, we evaluate the point-plane distance with the dot product we discussed earlier. Otherwise we write <CodeInline>0.0</CodeInline>, which never clips anything. Remember that <CodeInline>GetPrimitive_PerObjectClipPlaneEnabledSign_FromFlags</CodeInline> returns a non-positive value when the flag is set, which is why we compare against <CodeInline>0.0</CodeInline>.
+
+There is one detail to be careful about. The world positions in these shaders are in translated world space, which means they are relative to the camera. This is how Unreal keeps the precision in large worlds. Our clip plane, on the other hand, is defined relative to the world origin. So before evaluating the distance, we move the position back to the absolute world space by adding <CodeInline>ResolvedView.WorldCameraOrigin</CodeInline> to it. <CodeInline>DFHackToFloat</CodeInline> converts the double-float (large world coordinates) representation of the camera origin to a regular <CodeInline>float3</CodeInline>.
+
+Every change is wrapped in <CodeInline>USE_GLOBAL_CLIP_PLANE</CodeInline>, which is why <CodeInline>r.AllowGlobalClipPlane</CodeInline> has to be enabled for our feature to work.
+
+#### <CodeInline>AnisotropyPassShader.usf</CodeInline>
+
+When a material uses anisotropic specular, Unreal renders the affected meshes in an additional anisotropy pass that writes the tangent and the anisotropy strength into a separate GBuffer target. Its vertex shader transforms the vertices exactly like the base pass does. If we do not clip here, the clipped part of the mesh would still write anisotropy data to pixels where it is not visible.
+
+<CodeBlock
+  code={`
+void MainVertexShader(
+  FVertexFactoryInput Input,
+  out FVertexOutput Output 
+#if USE_GLOBAL_CLIP_PLANE
+  , out float OutGlobalClipPlaneDistance : SV_ClipDistance
+  , out float OutPerObjectClipPlaneDistance : SV_ClipDistance1
+#endif
+#if INSTANCED_STEREO
+  , out uint ViewportIndex : SV_ViewPortArrayIndex
+#endif
+  )
+{
+  //...
+
+  #if USE_GLOBAL_CLIP_PLANE
+    OutGlobalClipPlaneDistance = dot(ResolvedView.GlobalClippingPlane, float4(WorldPos.xyz, 1));
+  
+    //Per object clip plane is enabled
+    if (GetPrimitive_PerObjectClipPlaneEnabledSign_FromFlags(GetPrimitiveData(VFIntermediates).Flags) <= 0.0f)
+    {
+      float3 AbsoluteWorldPos = WorldPos + DFHackToFloat(ResolvedView.WorldCameraOrigin);
+      OutPerObjectClipPlaneDistance = dot(GetPrimitiveData(VFIntermediates).PerObjectClipPlane, float4(AbsoluteWorldPos.xyz, 1));
+    }
+    else
+    {
+      OutPerObjectClipPlaneDistance = 0.0f;
+    }
+  #endif
+
+  Output.Interps = VertexFactoryGetInterpolants(Input, VFIntermediates, VertexParameters);
+  //...
+}
+`}
+  filename="AnisotropyPassShader.usf"
+/>
+
+#### <CodeInline>BasePassVertexShader.usf</CodeInline>
+
+This is the most important one. The base pass draws the opaque geometry into the GBuffer in the deferred renderer, and it also draws the translucent and forward-shaded geometry. It transforms the vertices, applies world position offset and prepares the interpolants for the pixel shader. Clipping here is what actually removes the clipped part from the final image.
+
+<CodeBlock
+  code={`
+void Main(
+  FVertexFactoryInput Input,
+  out FBasePassVSOutput Output
+#if USE_GLOBAL_CLIP_PLANE
+  , out float OutGlobalClipPlaneDistance : SV_ClipDistance
+  , out float OutPerObjectClipPlaneDistance : SV_ClipDistance1
+#endif
+#if INSTANCED_STEREO
+  , out uint ViewportIndex : SV_ViewPortArrayIndex
+#endif
+  )
+{
+  //...
+    Output.Position = INVARIANT(ClipSpacePosition);
+  }
+
+#if USE_GLOBAL_CLIP_PLANE
+  OutGlobalClipPlaneDistance = dot(ResolvedView.GlobalClippingPlane, float4(WorldPosition.xyz, 1));
+  //Per object clip plane is enabled
+  if (GetPrimitive_PerObjectClipPlaneEnabledSign_FromFlags(GetPrimitiveData(VFIntermediates).Flags) <= 0.0f)
+  {
+    float3 AbsoluteWorldPos = WorldPosition + DFHackToFloat(ResolvedView.WorldCameraOrigin);
+    OutPerObjectClipPlaneDistance = dot(GetPrimitiveData(VFIntermediates).PerObjectClipPlane, float4(AbsoluteWorldPos.xyz, 1));
+  }
+  else
+  {
+    OutPerObjectClipPlaneDistance = 0.0f;
+  }
+#endif
+  #if USE_WORLD_POSITION_EXCLUDING_SHADER_OFFSETS
+    Output.BasePassInterpolants.PixelPositionExcludingWPO = WorldPositionExcludingWPO.xyz;
+  #endif
+  //...
+}
+`}
+  filename="BasePassVertexShader.usf"
+/>
+
+#### <CodeInline>DebugViewModeVertexShader.usf</CodeInline>
+
+This shader is used by the debug view modes of the editor such as shader complexity, quad overdraw and the texture streaming accuracy views. Extending it keeps these views consistent with what is actually rendered, so a clipped part of a mesh does not show up as overdraw or shader cost.
+
+<CodeBlock
+  code={`
+void Main(
+  FVertexFactoryInput Input,
+  out FDebugVSOutput Output
+#if USE_GLOBAL_CLIP_PLANE
+  , out float OutGlobalClipPlaneDistance : SV_ClipDistance
+  , out float OutPerObjectClipPlaneDistance : SV_ClipDistance1
+#endif
+#if INSTANCED_STEREO
+  , out uint ViewportIndex : SV_ViewPortArrayIndex
+#endif
+  )
+{
+  //...
+  {
+    float4 RasterizedWorldPosition = VertexFactoryGetRasterizedWorldPosition(Input, VFIntermediates, WorldPos);
+    Output.Position = INVARIANT(mul(RasterizedWorldPosition, ResolvedView.TranslatedWorldToClip));
+  }
+
+#if USE_GLOBAL_CLIP_PLANE
+  OutGlobalClipPlaneDistance = dot(ResolvedView.GlobalClippingPlane, float4(WorldPos.xyz, 1));
+  
+  //Per object clip plane is enabled
+  if (GetPrimitive_PerObjectClipPlaneEnabledSign_FromFlags(GetPrimitiveData(VFIntermediates).Flags) <= 0.0f)
+  {
+    float3 AbsoluteWorldPos = WorldPos + DFHackToFloat(ResolvedView.WorldCameraOrigin);
+    OutPerObjectClipPlaneDistance = dot(GetPrimitiveData(VFIntermediates).PerObjectClipPlane, float4(AbsoluteWorldPos.xyz, 1));
+  }
+  else
+  {
+    OutPerObjectClipPlaneDistance = 0.0f;
+  }
+#endif
+  Output.VertexColor = VertexParameters.VertexColor;
+  //...
+}
+`}
+  filename="DebugViewModeVertexShader.usf"
+/>
+
+#### <CodeInline>DepthOnlyVertexShader.usf</CodeInline>
+
+This shader renders the geometry into the depth buffer only. It is used by the depth prepass, and also by the custom depth pass. The depth prepass is filled before the base pass, and the base pass then only shades the pixels that match the depth in it. If we clip in the base pass but not here, the clipped part of the mesh would still be in the depth buffer and would hide everything behind it, leaving a hole in the image. So the depth passes must clip exactly the same way as the base pass.
+
+<CodeBlock
+  code={`
+void Main(
+  FVertexFactoryInput Input,
+  out FDepthOnlyVSOutput Output
+#if USE_GLOBAL_CLIP_PLANE
+  , out float OutGlobalClipPlaneDistance : SV_ClipDistance
+  , out float OutPerObjectClipPlaneDistance : SV_ClipDistance1
+#endif
+  //...
+  )
+{
+  //...
+  #if XBOXONE_BIAS_HACK
+    //...
+    Output.Position.z -= 0.0001 * Output.Position.w;
+  #endif
+
+#if USE_GLOBAL_CLIP_PLANE
+  OutGlobalClipPlaneDistance = dot(ResolvedView.GlobalClippingPlane, float4(WorldPos.xyz, 1));
+  //Per object clip plane is enabled
+  if (GetPrimitive_PerObjectClipPlaneEnabledSign_FromFlags(GetPrimitiveData(VFIntermediates).Flags) <= 0.0f)
+  {
+    float3 AbsoluteWorldPos = WorldPos + DFHackToFloat(ResolvedView.WorldCameraOrigin);
+    OutPerObjectClipPlaneDistance = dot(GetPrimitiveData(VFIntermediates).PerObjectClipPlane, float4(AbsoluteWorldPos.xyz, 1));
+  }
+  else
+  {
+    OutPerObjectClipPlaneDistance = 0.0f;
+  }
+#endif
+  //...
+}
+`}
+  filename="DepthOnlyVertexShader.usf"
+/>
+
+#### <CodeInline>DistortAccumulateVS.usf</CodeInline>
+
+Translucent materials that use refraction are rendered in a distortion pass that accumulates the screen-space offsets into a separate buffer. Later, this buffer is used to distort the scene color. Without clipping here, the clipped part of a refractive mesh would still bend the image behind it, even though the mesh itself is not visible there.
+
+<CodeBlock
+  code={`
+void Main(
+  FVertexFactoryInput Input,
+  out VS_OUTPUT_TYPE Output
+#if USE_GLOBAL_CLIP_PLANE
+  , out float OutGlobalClipPlaneDistance : SV_ClipDistance
+  , out float OutPerObjectClipPlaneDistance : SV_ClipDistance1
+#endif
+#if INSTANCED_STEREO
+  , out uint ViewportIndex : SV_ViewPortArrayIndex
+#endif
+  )
+{
+  //...
+  Output.Position = mul(WorldPosition, ResolvedView.TranslatedWorldToClip);
+  Output.FactoryInterpolants = VertexFactoryGetInterpolantsVSToPS(Input, VFIntermediates, VertexParameters);
+
+#if USE_GLOBAL_CLIP_PLANE
+  OutGlobalClipPlaneDistance = dot(ResolvedView.GlobalClippingPlane, float4(WorldPosition.xyz, 1));
+  //Per object clip plane is enabled
+  if (GetPrimitive_PerObjectClipPlaneEnabledSign_FromFlags(GetPrimitiveData(VFIntermediates).Flags) <= 0.0f)
+  {
+    float3 AbsoluteWorldPos = WorldPosition + DFHackToFloat(ResolvedView.WorldCameraOrigin);
+    OutPerObjectClipPlaneDistance = dot(GetPrimitiveData(VFIntermediates).PerObjectClipPlane, float4(AbsoluteWorldPos.xyz, 1));
+  }
+  else
+  {
+    OutPerObjectClipPlaneDistance = 0.0f;
+  }
+#endif
+
+  Output.PixelPosition = WorldPosition;
+  //...
+}
+`}
+  filename="DistortAccumulateVS.usf"
+/>
+
+#### <CodeInline>HitProxyVertexShader.usf</CodeInline>
+
+Hit proxies are how the editor knows which object is under the mouse cursor. The editor renders every selectable primitive into an off-screen buffer with a unique ID and reads the ID back when you click on the viewport. Extending this shader makes clicking on the clipped (invisible) part of a mesh not select it, which is what you would expect.
+
+<CodeBlock
+  code={`
+void Main(
+  FVertexFactoryInput Input,
+  out FHitProxyVSOutput Output
+#if USE_GLOBAL_CLIP_PLANE
+  , out float OutGlobalClipPlaneDistance : SV_ClipDistance
+  , out float OutPerObjectClipPlaneDistance : SV_ClipDistance1
+#endif
+#if INSTANCED_STEREO
+  , out uint ViewportIndex : SV_ViewPortArrayIndex
+#endif
+  )
+{
+  //...
+  {
+    float4 RasterizedWorldPosition = VertexFactoryGetRasterizedWorldPosition(Input, VFIntermediates, WorldPosition);
+    Output.Position = INVARIANT(mul(RasterizedWorldPosition, ResolvedView.TranslatedWorldToClip));
+  }
+
+#if USE_GLOBAL_CLIP_PLANE
+  OutGlobalClipPlaneDistance = dot(ResolvedView.GlobalClippingPlane, float4(WorldPosition.xyz, 1));
+  
+  //Per object clip plane is enabled
+  if (GetPrimitive_PerObjectClipPlaneEnabledSign_FromFlags(GetPrimitiveData(VFIntermediates).Flags) <= 0.0f)
+  {
+    float3 AbsoluteWorldPos = WorldPosition + DFHackToFloat(ResolvedView.WorldCameraOrigin);
+    OutPerObjectClipPlaneDistance = dot(GetPrimitiveData(VFIntermediates).PerObjectClipPlane, float4(AbsoluteWorldPos.xyz, 1));
+  }
+  else
+  {
+    OutPerObjectClipPlaneDistance = 0.0f;
+  }
+#endif
+
+  Output.FactoryInterpolants = VertexFactoryGetInterpolantsVSToPS(Input, VFIntermediates, VertexParameters);
+  Output.PixelPosition = WorldPosition;
+  //...
+}
+`}
+  filename="HitProxyVertexShader.usf"
+/>
+
+#### <CodeInline>LightMapDensityShader.usf</CodeInline>
+
+This shader renders the Lightmap Density view mode of the editor, which colors every mesh by the resolution of its lightmap texels. As with the other debug views, we clip here so the view matches the final image.
+
+<CodeBlock
+  code={`
+void MainVertexShader(
+  FVertexFactoryInput Input,
+  out FLightMapDensityVSOutput Output
+#if USE_GLOBAL_CLIP_PLANE
+  , out float OutGlobalClipPlaneDistance : SV_ClipDistance
+  , out float OutPerObjectClipPlaneDistance : SV_ClipDistance1
+#endif
+  )
+{
+  //...
+  Output.WorldPosition = WorldPosition;
+  {
+    float4 RasterizedWorldPosition = VertexFactoryGetRasterizedWorldPosition(Input, VFIntermediates, Output.WorldPosition);
+    float4 ClipSpacePosition = mul(RasterizedWorldPosition, ResolvedView.TranslatedWorldToClip);
+    Output.Position = INVARIANT(ClipSpacePosition);
+  }
+
+#if USE_GLOBAL_CLIP_PLANE
+  OutGlobalClipPlaneDistance = dot(ResolvedView.GlobalClippingPlane, float4(WorldPosition.xyz, 1));
+  
+  //Per object clip plane is enabled
+  if (GetPrimitive_PerObjectClipPlaneEnabledSign_FromFlags(GetPrimitiveData(VFIntermediates).Flags) <= 0.0f)
+  {
+    float3 AbsoluteWorldPos = WorldPosition + DFHackToFloat(ResolvedView.WorldCameraOrigin);
+    OutPerObjectClipPlaneDistance = dot(GetPrimitiveData(VFIntermediates).PerObjectClipPlane, float4(AbsoluteWorldPos.xyz, 1));
+  }
+  else
+  {
+    OutPerObjectClipPlaneDistance = 0.0f;
+  }
+#endif
+  Output.FactoryInterpolants = VertexFactoryGetInterpolantsVSToPS(Input, VFIntermediates, VertexParameters);
+  //...
+}
+`}
+  filename="LightMapDensityShader.usf"
+/>
+
+#### <CodeInline>MeshDecals.usf</CodeInline>
+
+Mesh decals are meshes with a deferred decal material applied to them. Instead of projecting a box onto the scene, they draw their own geometry and blend into the GBuffer of the surface below. Since they are regular primitives, they can have a per-object clip plane too. Here we clip the decal geometry itself.
+
+<CodeBlock
+  code={`
+void MainVS(
+  FVertexFactoryInput Input,
+  out VS_OUTPUT_TYPE Output
+  //...
+#if USE_GLOBAL_CLIP_PLANE
+  , out float OutGlobalClipPlaneDistance : SV_ClipDistance
+  , out float OutPerObjectClipPlaneDistance : SV_ClipDistance1
+#endif
+  )
+{
+  //...
+  Output.Position = mul(WorldPosition, ResolvedView.TranslatedWorldToClip);
+  Output.FactoryInterpolants = VertexFactoryGetInterpolantsVSToPS(Input, VFIntermediates, VertexParameters);
+
+#if USE_GLOBAL_CLIP_PLANE
+  OutGlobalClipPlaneDistance = dot(ResolvedView.GlobalClippingPlane, float4(WorldPosition.xyz, 1));
+  
+  //Per object clip plane is enabled
+  if (GetPrimitive_PerObjectClipPlaneEnabledSign_FromFlags(GetPrimitiveData(VFIntermediates).Flags) <= 0.0f)
+  {
+    float3 AbsoluteWorldPos = WorldPosition + DFHackToFloat(ResolvedView.WorldCameraOrigin);
+    OutPerObjectClipPlaneDistance = dot(GetPrimitiveData(VFIntermediates).PerObjectClipPlane, float4(AbsoluteWorldPos.xyz, 1));
+  }
+  else
+  {
+    OutPerObjectClipPlaneDistance = 0.0f;
+  }
+#endif
+
+#if HAS_INVERTED_Z_BUFFER
+  // Move all geometry a small amount towards the camera to avoid z-fighting.
+  // Assuming a reverse z buffer this pushes the near plane a fixed small distance.
+  Output.Position.z += ResolvedView.DecalDepthBias;
+#endif
+}
+`}
+  filename="MeshDecals.usf"
+/>
+
+#### <CodeInline>PositionOnlyDepthVertexShader.usf</CodeInline>
+
+This is a faster version of the depth-only shader. It is used for opaque materials that do not modify the vertex positions (no world position offset). In this case, the only thing needed to render the depth is the vertex position, so the shader reads only the position stream of the mesh. For the same reason as the depth-only shader, it must clip exactly like the base pass.
+
+This shader is different from the others. It takes an <CodeInline>FPositionOnlyVertexFactoryInput</CodeInline> and never creates the <CodeInline>FVertexFactoryIntermediates</CodeInline>, so we cannot use <CodeInline>GetPrimitiveData(VFIntermediates)</CodeInline> here. Instead, we add two small helper functions to <CodeInline>LocalVertexFactory.ush</CodeInline> that read the primitive flags and our clip plane directly from the position-only input.
+
+<CodeBlock
+  code={`
+float4 VertexFactoryGetPerObjectClipPlane(FPositionOnlyVertexFactoryInput Input)
+{
+  return LOCALVF_GET_COMMON_INTERMEDIATES(Input).SceneData.Primitive.PerObjectClipPlane;
+}
+
+uint VertexFactoryGetPrimitiveFlags(FPositionOnlyVertexFactoryInput Input)
+{
+  return LOCALVF_GET_COMMON_INTERMEDIATES(Input).SceneData.Primitive.Flags;
+}
+`}
+  filename="LocalVertexFactory.ush"
+/>
+
+Then we use them in the shader in place of <CodeInline>GetPrimitiveData</CodeInline>.
+
+<CodeBlock
+  code={`
+void Main(
+  FPositionOnlyVertexFactoryInput Input,
+  out INVARIANT_OUTPUT float4 OutPosition : SV_POSITION
+#if USE_GLOBAL_CLIP_PLANE
+  , out float OutGlobalClipPlaneDistance : SV_ClipDistance
+  , out float OutPerObjectClipPlaneDistance : SV_ClipDistance1
+#endif
+  //...
+  )
+{
+  //...
+  float4 WorldPos = VertexFactoryGetWorldPosition(Input);
+
+  {
+    OutPosition = INVARIANT(mul(WorldPos, ResolvedView.TranslatedWorldToClip));
+  }
+
+#if USE_GLOBAL_CLIP_PLANE
+  OutGlobalClipPlaneDistance = dot(ResolvedView.GlobalClippingPlane, float4(WorldPos.xyz, 1));
+  
+  //Per object clip plane is enabled
+  if (GetPrimitive_PerObjectClipPlaneEnabledSign_FromFlags(VertexFactoryGetPrimitiveFlags(Input)) <= 0.0f)
+  {
+    float3 AbsoluteWorldPos = WorldPos + DFHackToFloat(ResolvedView.WorldCameraOrigin);
+    OutPerObjectClipPlaneDistance = dot(VertexFactoryGetPerObjectClipPlane(Input), float4(AbsoluteWorldPos.xyz, 1));
+  }
+  else
+  {
+    OutPerObjectClipPlaneDistance = 0.0f;
+  }
+#endif
+}
+`}
+  filename="PositionOnlyDepthVertexShader.usf"
+/>
+
+#### <CodeInline>VelocityShader.usf</CodeInline>
+
+The velocity pass writes the screen-space motion of every moving pixel into the velocity buffer. TAA, TSR and motion blur use this buffer to know where each pixel was in the previous frame. If we do not clip here, the clipped part of a moving mesh would still write motion vectors, and motion blur or temporal ghosting would show up where the mesh is not visible. Notice that this shader names its position <CodeInline>TranslatedWorldPosition</CodeInline>, but it is the same camera-relative position we used in the other shaders.
+
+<CodeBlock
+  code={`
+void MainVertexShader(
+  FVertexFactoryInput Input,
+  out FVertexOutput Output 
+#if USE_GLOBAL_CLIP_PLANE
+  , out float OutGlobalClipPlaneDistance : SV_ClipDistance
+  , out float OutPerObjectClipPlaneDistance : SV_ClipDistance1
+#endif
+  //...
+  )
+{
+  //...
+  {
+    float4 ScreenPos;
+    // compute the old screen pos with the old world position and the old camera matrix
+    float4 PrevScreenPosObj = mul(float4(PrevTranslatedWorldPosition.xyz, 1), ResolvedView.PrevTranslatedWorldToClip);
+
+    {
+      ScreenPos = mul(float4(TranslatedWorldPosition.xyz, 1), ResolvedView.TranslatedWorldToClip);
+      Output.Position = ScreenPos;
+    }
+
+#if USE_GLOBAL_CLIP_PLANE
+    OutGlobalClipPlaneDistance = dot(ResolvedView.GlobalClippingPlane, float4(TranslatedWorldPosition.xyz, 1));
+    //Per object clip plane is enabled
+    if (GetPrimitive_PerObjectClipPlaneEnabledSign_FromFlags(GetPrimitiveData(VFIntermediates).Flags) <= 0.0f)
+    {
+      float3 AbsoluteWorldPos = TranslatedWorldPosition + DFHackToFloat(ResolvedView.WorldCameraOrigin);
+      OutPerObjectClipPlaneDistance = dot(GetPrimitiveData(VFIntermediates).PerObjectClipPlane, float4(AbsoluteWorldPos.xyz, 1));
+    }
+    else
+    {
+      OutPerObjectClipPlaneDistance = 0.0f;
+    }
+#endif
+
+    Output.Interps.PackedVelocityA = INVARIANT(ScreenPos);
+    Output.Interps.PackedVelocityC = INVARIANT(PrevScreenPosObj);
+  }
+  //...
+}
+`}
+  filename="VelocityShader.usf"
+/>
+
+### Extending Vertex Factories
+
+Extending the shaders is not enough on its own. Take a look at the code we added to them once again. To find out whether the per-object clip plane is enabled and to read the plane itself, every shader calls <CodeInline>GetPrimitiveData(VFIntermediates)</CodeInline>, and <CodeInline>PositionOnlyDepthVertexShader.usf</CodeInline> calls <CodeInline>VertexFactoryGetPrimitiveFlags</CodeInline> and <CodeInline>VertexFactoryGetPerObjectClipPlane</CodeInline>. None of these functions is defined in the shaders. They are provided by the vertex factory.
+
+Remember what we said about vertex factories. Every shader we extended includes <CodeInline>/Engine/Generated/VertexFactory.ush</CodeInline>. This file does not exist on the disk. When the engine compiles a shader for a specific vertex factory, it generates this file so that it includes the shader file of that vertex factory. As a result, the same <CodeInline>BasePassVertexShader.usf</CodeInline> gets compiled once with <CodeInline>LocalVertexFactory.ush</CodeInline>, once with <CodeInline>HairStrandsVertexFactory.ush</CodeInline> and so on, once for every vertex factory a material can be used with.
+
+HLSL has no virtual functions or interfaces. The only thing that holds this system together is a convention: every vertex factory has to define every function the shaders call, with the same name and signature. If a single vertex factory is missing one of them, every shader permutation compiled with that vertex factory fails to compile. So by calling new functions in the shaders, we also have to make sure every vertex factory that reaches those shaders defines them.
+
+Most vertex factories, such as <CodeInline>LocalVertexFactory.ush</CodeInline> and <CodeInline>LandscapeVertexFactory.ush</CodeInline>, already define <CodeInline>GetPrimitiveData(FVertexFactoryIntermediates)</CodeInline> because the engine itself uses it in other places. But a few of them do not, and the position-only helpers are completely new. This leaves us with two groups of changes:
+
+* <CodeInline>LidarPointCloudVertexFactory.ush</CodeInline> and <CodeInline>HairStrandsVertexFactory.ush</CodeInline> need <CodeInline>GetPrimitiveData</CodeInline>.
+* <CodeInline>GeometryCacheVertexFactory.ush</CodeInline>, <CodeInline>GeometryCollectionVertexFactory.ush</CodeInline> and <CodeInline>LocalVertexFactory.ush</CodeInline> support the position-only depth pass, so they need <CodeInline>VertexFactoryGetPrimitiveFlags</CodeInline> and <CodeInline>VertexFactoryGetPerObjectClipPlane</CodeInline>.
+
+#### <CodeInline>LidarPointCloudVertexFactory.ush</CodeInline>
+
+This vertex factory belongs to the LiDAR Point Cloud plugin and renders scanned point clouds, where every point is drawn as a small sprite. It keeps the scene data of the primitive in its intermediates, but it never exposes it through <CodeInline>GetPrimitiveData</CodeInline>. All we need is a function that returns it.
+
+<CodeBlock
+  code={`
+#if USE_INSTANCING
+float4 VertexFactoryGetInstanceHitProxyId(FVertexFactoryInput Input, FVertexFactoryIntermediates Intermediates) { return 0; }
+#endif
+
+FPrimitiveSceneData GetPrimitiveData(FVertexFactoryIntermediates Intermediates)
+{
+  return Intermediates.SceneData.Primitive;
+}
+
+float4 VertexFactoryGetTranslatedPrimitiveVolumeBounds(FVertexFactoryInterpolantsVSToPS Interpolants)
+{
+  //...
+}
+`}
+  filename="LidarPointCloudVertexFactory.ush"
+/>
+
+#### <CodeInline>GeometryCacheVertexFactory.ush</CodeInline>
+
+This vertex factory plays back geometry caches, which are baked vertex animations usually imported from Alembic files. It supports the position-only depth pass, so we add the two helper functions next to its position-only <CodeInline>VertexFactoryGetWorldPosition</CodeInline>. Since there are no intermediates in this path, we read the primitive data directly from the GPU Scene with <CodeInline>VF_GPUSCENE_GET_INTERMEDIATES</CodeInline>, which is what the function above does as well.
+
+<CodeBlock
+  code={`
+/** for depth-only pass */
+float4 VertexFactoryGetWorldPosition(FPositionOnlyVertexFactoryInput Input)
+{
+  FSceneDataIntermediates SceneData = VF_GPUSCENE_GET_INTERMEDIATES(Input);
+  return TransformLocalToTranslatedWorld(Input.Position.xyz, SceneData.InstanceData.LocalToWorld);
+}
+
+float4 VertexFactoryGetPerObjectClipPlane(FPositionOnlyVertexFactoryInput Input)
+{
+  return VF_GPUSCENE_GET_INTERMEDIATES(Input).Primitive.PerObjectClipPlane;
+}
+
+uint VertexFactoryGetPrimitiveFlags(FPositionOnlyVertexFactoryInput Input)
+{
+  return VF_GPUSCENE_GET_INTERMEDIATES(Input).Primitive.Flags;
+}
+
+/** for shadow pass (used for slope bias) */
+float4 VertexFactoryGetWorldPosition(FPositionAndNormalOnlyVertexFactoryInput Input)
+{
+  //...
+}
+`}
+  filename="GeometryCacheVertexFactory.ush"
+/>
+
+#### <CodeInline>GeometryCollectionVertexFactory.ush</CodeInline>
+
+This vertex factory renders geometry collections, the fractured meshes used by Chaos destruction. Every piece of a geometry collection has its own transform, and the vertex factory loads the right one for every vertex. The clip plane, however, belongs to the whole primitive, not to a single piece, so the helpers are the same as the ones in the geometry cache vertex factory.
+
+<CodeBlock
+  code={`
+  SetPrimitiveId(Interpolants, Intermediates.SceneData.PrimitiveId);
+
+  return Interpolants;
+}
+
+float4 VertexFactoryGetPerObjectClipPlane(FPositionOnlyVertexFactoryInput Input)
+{
+  return VF_GPUSCENE_GET_INTERMEDIATES(Input).Primitive.PerObjectClipPlane;
+}
+
+uint VertexFactoryGetPrimitiveFlags(FPositionOnlyVertexFactoryInput Input)
+{
+  return VF_GPUSCENE_GET_INTERMEDIATES(Input).Primitive.Flags;
+}
+
+/** for depth-only pass */
+float4 VertexFactoryGetWorldPosition(FPositionOnlyVertexFactoryInput Input)
+{
+  FTransformData TransformData = LoadTransformData(VF_GPUSCENE_GET_INTERMEDIATES(Input), GCVF_GET_INPUT_VERTEX_ID(Input));
+  return TransformLocalToTranslatedWorld(Input.Position.xyz, TransformData.LocalToWorld);
+}
+`}
+  filename="GeometryCollectionVertexFactory.ush"
+/>
+
+#### <CodeInline>HairStrandsVertexFactory.ush</CodeInline>
+
+This vertex factory renders the strands of groom assets. Like the LiDAR vertex factory, it already has the primitive data in its intermediates, since it uses it to calculate the tangent basis. We only expose it through <CodeInline>GetPrimitiveData</CodeInline>, right after the intermediates are created.
+
+<CodeBlock
+  code={`
+FVertexFactoryIntermediates GetVertexFactoryIntermediates(FVertexFactoryInput Input)
+{
+  //...
+  Intermediates.TangentToWorld = CalcTangentToWorld(Intermediates.SceneData.Primitive, Intermediates.TangentToLocal);
+  Intermediates.TangentToWorldSign = TangentSign * GetPrimitive_DeterminantSign_FromFlags(Intermediates.SceneData.Primitive.Flags);
+  return Intermediates;
+}
+
+FPrimitiveSceneData GetPrimitiveData(FVertexFactoryIntermediates Intermediates)
+{
+  return Intermediates.SceneData.Primitive;
+}
+`}
+  filename="HairStrandsVertexFactory.ush"
+/>
+
+#### <CodeInline>LocalVertexFactory.ush</CodeInline>
+
+This is the most widely used vertex factory. Static meshes, instanced static meshes and many other mesh types are rendered with it. It already defines <CodeInline>GetPrimitiveData</CodeInline>, so it only needs the position-only helpers we saw in the <CodeInline>PositionOnlyDepthVertexShader.usf</CodeInline> section. The difference from the previous ones is that the local vertex factory has its own macro, <CodeInline>LOCALVF_GET_COMMON_INTERMEDIATES</CodeInline>, which builds the common intermediates (including the scene data) from the position-only input.
+
+<CodeBlock
+  code={`
+float4 VertexFactoryGetWorldPosition(FPositionOnlyVertexFactoryInput Input)
+{
+  //...
+  return TransformLocalToTranslatedWorld(CalcPositionPrimitiveSpace(Intermediates, Input.Position).xyz, LocalToWorld);
+}
+
+float4 VertexFactoryGetPerObjectClipPlane(FPositionOnlyVertexFactoryInput Input)
+{
+  return LOCALVF_GET_COMMON_INTERMEDIATES(Input).SceneData.Primitive.PerObjectClipPlane;
+}
+
+uint VertexFactoryGetPrimitiveFlags(FPositionOnlyVertexFactoryInput Input)
+{
+  return LOCALVF_GET_COMMON_INTERMEDIATES(Input).SceneData.Primitive.Flags;
+}
+
+/** for depth-only pass (slope depth bias) */
+float4 VertexFactoryGetWorldPosition(FPositionAndNormalOnlyVertexFactoryInput Input)
+{
+  //...
+}
+`}
+  filename="LocalVertexFactory.ush"
+/>
+
+## Conclusion
+
+That is all it takes. Once the engine is compiled with these changes and the global clip plane feature is enabled, the per-object clip plane is ready to use. The feature can be enabled from the project settings with the **Support global clip plane for Planar Reflections** option under the reflection settings of the renderer, or by setting <CodeInline>r.AllowGlobalClipPlane=1</CodeInline> in the <CodeInline>[/Script/Engine.RendererSettings]</CodeInline> section of <CodeInline>DefaultEngine.ini</CodeInline>. Since this option changes the shaders themselves, the editor has to be restarted, and the first launch triggers a shader recompile. After that, every primitive component shows the per-object clip plane properties in the Rendering category of its details panel, and gameplay code or Blueprints can drive the plane at runtime with <CodeInline>SetPerObjectClipPlaneEnabled</CodeInline> and <CodeInline>SetPerObjectClipPlane</CodeInline>.
+
+### Limitations and Possible Improvements
+
+This implementation covers the most common rendering paths, but it is far from complete. Since we only extended the shaders that already support the global clip plane, everything the global clip plane does not touch is not affected by our plane either. Here are the most important gaps, and a few improvements that would make the feature more useful.
+
+* **Nanite:** Nanite meshes do not go through the vertex shaders we extended. They are rasterized by Nanite's own rasterizer, partly in hardware and partly in a software rasterizer running in compute shaders. The software path cannot rely on <CodeInline>SV_ClipDistance</CodeInline> at all, so the distance test has to be done manually per triangle or per pixel. On top of that, the cluster culling would need to know about the plane, so clusters that are fully clipped are not drawn at all. Until then, a mesh needs Nanite disabled to be clipped.
+* **Shadows:** The shadow depth passes are not among the shaders we extended, so the clipped part of a mesh still casts shadows. Extending the shadow depth vertex shaders would fix this for regular shadow maps. Virtual shadow maps render Nanite geometry through the Nanite rasterizer, so they depend on Nanite support as well.
+* **Ray tracing and Lumen:** Ray tracing does not rasterize triangles, so clip distances have no meaning there. Hardware ray-traced reflections, shadows, path tracing and Lumen still see the whole mesh. Supporting them would require an any-hit shader that rejects the hits behind the plane, which is expensive. Lumen's software tracing uses mesh distance fields and its surface cache, which are both built from the full mesh, so the clipped part can still show up in indirect lighting and reflections.
+* **Distance field effects:** For the same reason, distance field shadows and distance field ambient occlusion still use the unclipped shape of the mesh.
+* **Mobile:** The mobile renderer has its own base pass shaders (<CodeInline>MobileBasePassCommon.ush</CodeInline>), which we did not extend.
+* **Capping the cut:** Clipping only removes geometry, it does not close the hole. When a closed mesh is cut, you look inside it and see its back faces, or nothing at all if they are culled. A proper cross-section effect needs the cut surface to be capped, which is usually done with a stencil technique or by shading the back faces with a flat color.
+* **Collision and queries:** The clip plane is purely visual. Physics, line traces and overlaps still use the whole mesh, so a gameplay system that relies on the clipped shape has to account for it separately.
+* **Precision:** We reconstruct the absolute world position in single precision and evaluate the plane in world space. Far from the world origin, this loses precision and the cut can start to wobble. Converting the plane into the camera-relative (translated world) space on the CPU, where double precision is available, would avoid this completely.
+* **Local-space planes:** The plane is defined in world space, so it does not follow the object when it moves or rotates. An option to define the plane relative to the primitive would be useful for effects that should stick to the object.
+* **Multiple planes:** The hardware provides up to eight clip distances, and we use only two of them. The same approach could be extended to support several planes per object, for example to cut out a box-shaped region.
+* **Cost:** Enabling <CodeInline>r.AllowGlobalClipPlane</CodeInline> adds an extra clip distance and a branch to the vertex shaders of every mesh in the project, even the ones that never use a clip plane. The engine itself warns that the global clip plane can increase the base pass cost noticeably. A dedicated shader permutation, enabled only for the primitives that need it, would remove this cost from the rest of the scene.
+
+Even with these limitations, the implementation shows how much can be achieved by extending what the engine already has. A single new property travels all the way from the editor, through the scene proxy and the GPU Scene, into the vertex shaders, and finally reaches the rasterizer. I hope it helps you understand how data flows from the game thread to the GPU in Unreal, and gives you a good starting point for your own rendering features.
