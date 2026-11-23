@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from 'react';
 import Image from 'next/image';
+import { withBasePath } from '@/lib/basePath';
 import { ASCII_COLS, ASCII_PORTRAIT, ASCII_ROWS } from './asciiPortraitData';
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -165,7 +166,7 @@ export default function AsciiPortrait() {
 
             {/* Hover: "decompile" back to the real photo */}
             <Image
-                src="/ProfilePhoto.jpg"
+                src={withBasePath("/ProfilePhoto.jpg")}
                 alt=""
                 fill
                 sizes="340px"

@@ -24,8 +24,15 @@ There is no filesystem-driven post index: `src/app/blog/page.tsx` holds a hardco
 
 Post assets (images, SVG diagrams) go in `public/blog/<slug>/` and are referenced by absolute path, e.g. `/blog/<slug>/Image_Foo.svg`.
 
+### Deployment and the base path
+The site is published to GitHub Pages by `.github/workflows/deploy-pages.yml` on every push to `main`. `next.config.ts` uses `output: 'export'` (static files in `out/`), `trailingSlash: true` and `images.unoptimized`, and takes `basePath` from the `PAGES_BASE_PATH` env var (`/PersonalWebPage` on a project page, empty locally or with a custom domain).
+
+`next/link` adds the base path by itself; nothing else does. Every other absolute URL — plain `<a href>`, CSS `url(...)`, `next/image` `src` — must go through `withBasePath()` from `src/lib/basePath.ts`. In MDX, use `<Img src="/blog/..." alt="..." />`, never a literal `<img>`: MDX does not route literal JSX tags through the component registry, so they would miss the prefix. `BeforeAfter`, `GameGif` and `GameVideo` prefix their own sources.
+
+To test a production build locally on Windows, set `MSYS_NO_PATHCONV=1` in Git Bash, otherwise `PAGES_BASE_PATH=/PersonalWebPage` is rewritten into a Windows path.
+
 ### MDX component registry
-`src/mdx-components.tsx` injects components into every MDX file globally, so MDX uses them without imports: `CodeBlock`, `CodeInline`, `MathBlock`, `MathInline`, `Notification`, `BeforeAfter`, `GameGif`, `GameVideo`. A new MDX component must be registered there.
+`src/mdx-components.tsx` injects components into every MDX file globally, so MDX uses them without imports: `CodeBlock`, `CodeInline`, `MathBlock`, `MathInline`, `Notification`, `BeforeAfter`, `GameGif`, `GameVideo`, `Table`, `Img`. A new MDX component must be registered there.
 
 Conventions in MDX content:
 - Code: `<CodeBlock code={\`...\`} filename="..." />` — code is passed as a template literal prop, so backslashes must be doubled (`\\`) and backticks escaped. `CodeBlock` has its own C++ tokenizer (used for HLSL too); the `language` prop only changes the header label.

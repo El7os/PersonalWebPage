@@ -8,6 +8,7 @@ import CodeInline from './components/CodeInline'
 import MathBlock from './components/MathBlock'
 import MathInline from './components/MathInline'
 import Table from './components/Table'
+import Img from './components/Img'
 
 export function useMDXComponents(components: MDXComponents): MDXComponents {
     return {
@@ -21,5 +22,6 @@ export function useMDXComponents(components: MDXComponents): MDXComponents {
         MathInline,
         Notification,
         Table,
+        Img,
     }
 }

@@ -1,5 +1,7 @@
 'use client';
 
+import { withBasePath } from '@/lib/basePath';
+
 import { useState, useRef, useEffect, MouseEvent as ReactMouseEvent, TouchEvent as ReactTouchEvent } from 'react';
 
 interface BeforeAfterProps {
@@ -78,7 +80,7 @@ export default function BeforeAfter({ imageBefore, imageAfter }: BeforeAfterProp
                     left: 0,
                     right: 0,
                     bottom: 0,
-                    backgroundImage: `url(${imageAfter})`,
+                    backgroundImage: `url(${withBasePath(imageAfter)})`,
                     backgroundSize: 'cover',
                     backgroundPosition: 'center',
                 }}
@@ -92,7 +94,7 @@ export default function BeforeAfter({ imageBefore, imageAfter }: BeforeAfterProp
                     left: 0,
                     right: 0,
                     bottom: 0,
-                    backgroundImage: `url(${imageBefore})`,
+                    backgroundImage: `url(${withBasePath(imageBefore)})`,
                     backgroundSize: 'cover',
                     backgroundPosition: 'center',
                     clipPath: `inset(0 ${100 - sliderPosition}% 0 0)`,

@@ -1,4 +1,5 @@
 import AsciiPortrait from './AsciiPortrait';
+import { withBasePath } from '@/lib/basePath';
 import DecryptText from './DecryptText';
 
 export default function HeroSection() {
@@ -33,8 +34,8 @@ export default function HeroSection() {
                     </p>
 
                     <div style={{ display: 'flex', gap: '1rem', flexWrap: 'wrap' }}>
-                        <a href="/blog" className="btn btn-primary">Read Research Blog</a>
-                        <a href="/about" className="btn btn-outline">More About Me</a>
+                        <a href={withBasePath("/blog/")} className="btn btn-primary">Read Research Blog</a>
+                        <a href={withBasePath("/about/")} className="btn btn-outline">More About Me</a>
                     </div>
                 </div>
             </section>

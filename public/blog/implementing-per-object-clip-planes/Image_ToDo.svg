@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<svg xmlns="http://www.w3.org/2000/svg" version="1.1" width="440px" height="542px" viewBox="0 0 440 542" style="background: transparent; color-scheme: light dark;">
+<svg xmlns="http://www.w3.org/2000/svg" version="1.1" width="440px" height="542px" viewBox="0 0 440 542" style="background: #ffffff; background-color: #ffffff; color-scheme: light;"><rect data-white-bg="1" x="0" y="0" width="100%" height="100%" fill="#ffffff"/>
   <style>
     .box   { fill: light-dark(#ffffff, #121212); stroke: light-dark(#000000, #ffffff); stroke-width: 1; }
     .line  { fill: none; stroke: light-dark(#000000, #ffffff); stroke-width: 1; }

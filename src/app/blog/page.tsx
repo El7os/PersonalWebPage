@@ -1,4 +1,5 @@
 import DecryptText from '@/components/DecryptText';
+import { withBasePath } from '@/lib/basePath';
 export default function Blog() {
     const posts = [
         {
@@ -35,7 +36,7 @@ export default function Blog() {
                         </div>
 
                         <h2 style={{ fontSize: '2rem', fontWeight: 'bold', marginBottom: '1rem', color: '#fff', lineHeight: '1.2' }}>
-                            <a href={`/blog/${post.slug}`} style={{ textDecoration: 'none', color: 'inherit' }} className="hover:text-[var(--accent-color)] transition-colors">
+                            <a href={withBasePath(`/blog/${post.slug}/`)} style={{ textDecoration: 'none', color: 'inherit' }} className="hover:text-[var(--accent-color)] transition-colors">
                                 {post.title}
                             </a>
                         </h2>
@@ -44,7 +45,7 @@ export default function Blog() {
                             {post.excerpt}
                         </p>
 
-                        <a href={`/blog/${post.slug}`} style={{
+                        <a href={withBasePath(`/blog/${post.slug}/`)} style={{
                             color: 'var(--accent-color)',
                             fontWeight: '600',
                             display: 'inline-flex',

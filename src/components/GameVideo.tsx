@@ -1,3 +1,5 @@
+import { withBasePath } from '@/lib/basePath';
+
 export default function GameVideo({ src, autoPlay = true, loop = true, muted = true, controls = false }: { src: string, autoPlay?: boolean, loop?: boolean, muted?: boolean, controls?: boolean }) {
     return (
         <div className="game-video-wrapper" style={{
@@ -11,7 +13,7 @@ export default function GameVideo({ src, autoPlay = true, loop = true, muted = t
             position: 'relative'
         }}>
             <video
-                src={src}
+                src={withBasePath(src)}
                 autoPlay={autoPlay}
                 loop={loop}
                 muted={muted}

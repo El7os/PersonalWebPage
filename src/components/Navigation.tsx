@@ -3,7 +3,8 @@ import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 
 export default function Navigation({ children }: { children: React.ReactNode }) {
-    const pathname = usePathname();
+    // trailingSlash is enabled, so strip it before comparing ("/blog/" -> "/blog").
+    const pathname = usePathname().replace(/\/+$/, '') || '/';
     const section = pathname.startsWith('/blog') ? 'blog' : pathname.startsWith('/about') ? 'about' : 'home';
 
     const navLinks = [

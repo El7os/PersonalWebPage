@@ -88,7 +88,7 @@ float FractalBenchmark()
 `} />
 
 <p align="center">
-  <img src="/blog/scalability-with-synthetic-benchmark/Image_Fractal.png" alt="Fractal"></img>
+  <Img src="/blog/scalability-with-synthetic-benchmark/Image_Fractal.png" alt="Fractal" />
 </p>
 
 The data gathered from the tests is divided by the number of *workloads* to compute an average. Each test is also given a weight that determines how much it contributes to the overall CPU score. The **Ray-Intersection** test has a weight of 1.0, while the **Fractal** test has a weight of 1.5.
@@ -118,7 +118,7 @@ Before the GPU tests, the GPU properties are queried and recorded.
 />
 
 <p align="center">
-  <img src="/blog/scalability-with-synthetic-benchmark/Image_DynamicRHI.png" alt="Dynamic RHI"></img>
+  <Img src="/blog/scalability-with-synthetic-benchmark/Image_DynamicRHI.png" alt="Dynamic RHI" />
 </p>
 
 The GPU tests only run if the application is rendering. Unlike the CPU tests, the GPU tests run in stages so that they do not trigger **Timeout Detection and Recovery**. The tests are as follows:
@@ -245,7 +245,7 @@ CVarLandscapeQuality.AsVariable()->SetOnChangedCallback(FConsoleVariableDelegate
 `} />
 
 <p align="center">
-  <img src="/blog/scalability-with-synthetic-benchmark/Image_ScalabilityFlow.png" alt="Scalability Flow"></img>
+  <Img src="/blog/scalability-with-synthetic-benchmark/Image_ScalabilityFlow.png" alt="Scalability Flow" />
 </p>
 
 Below are the <CodeInline>ViewDistanceQuality</CodeInline> scalability settings taken from <CodeInline>BaseScalability.ini</CodeInline>.

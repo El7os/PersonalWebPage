@@ -1,3 +1,5 @@
+import { withBasePath } from '@/lib/basePath';
+
 export default function GameGif({ src, alt = "Animated GIF" }: { src: string, alt?: string }) {
     return (
         <div className="game-gif-wrapper" style={{
@@ -10,7 +12,7 @@ export default function GameGif({ src, alt = "Animated GIF" }: { src: string, al
             border: '1px solid var(--glass-border)',
         }}>
             <img
-                src={src}
+                src={withBasePath(src)}
                 alt={alt}
                 loading="lazy"
                 style={{

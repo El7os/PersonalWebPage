@@ -1,4 +1,5 @@
 import DecryptText from '@/components/DecryptText';
+import { withBasePath } from '@/lib/basePath';
 export default function About() {
     const skills = [
         { category: "Languages", items: ["C++", "Python"] },
@@ -26,7 +27,7 @@ export default function About() {
                             backgroundColor: '#1a1a1a',
                             margin: '0 auto 1.5rem auto',
                             border: '2px solid var(--accent-color)',
-                            backgroundImage: 'url("/ProfilePhoto.jpg")',
+                            backgroundImage: `url("${withBasePath('/ProfilePhoto.jpg')}")`,
                             backgroundSize: 'cover'
                         }} />
                         <h2 style={{ fontSize: '1.5rem', color: '#fff', marginBottom: '0.5rem' }}>Game Programmer</h2>
